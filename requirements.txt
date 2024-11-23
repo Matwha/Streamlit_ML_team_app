@@ -1,1 +1,10 @@
-streamlit
+streamlit>=1.40.0
+pandas>=2.1.0
+numpy>=1.26.0
+plotly>=5.24.0
+scikit-learn>=1.4.0
+pycaret>=3.3.0
+sktime>=0.26.0
+pmdarima>=2.0.0  # For ARIMA models
+prophet>=1.1.0   # For Prophet models
+tensorflow>=2.17.0  # If using LSTM models
