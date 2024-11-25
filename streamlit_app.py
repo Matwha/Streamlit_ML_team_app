@@ -176,7 +176,35 @@ def main():
         model_params = {}
         lstm_params = {}
         if advanced_settings:
-            if model_choice == "LSTM":
+            if model_choice == "ETS":
+                st.subheader("Advanced ETS Settings")
+                model_params.update({
+                    "error": st.selectbox("Error type", ["add", "mul"]),
+                    "trend": st.selectbox("Trend type", ["add", "mul", None]),
+                    "seasonal": st.selectbox("Seasonal type", ["add", "mul", None]),
+                    "damped_trend": st.checkbox("Damped trend", False),
+                    "sp": st.number_input("Seasonal periods", min_value=1, value=1)
+                })
+            elif model_choice == "ARIMA":
+                st.subheader("Advanced ARIMA Settings")
+                model_params.update({
+                    "start_p": st.number_input("Min p", 0, value=0),
+                    "max_p": st.number_input("Max p", 0, value=5),
+                    "start_q": st.number_input("Min q", 0, value=0),
+                    "max_q": st.number_input("Max q", 0, value=5),
+                    "d": st.number_input("Differencing (d)", 0, value=1),
+                    "seasonal": st.checkbox("Seasonal", True)
+                })
+                if model_params["seasonal"]:
+                    model_params.update({
+                        "start_P": st.number_input("Min P", 0, value=0),
+                        "max_P": st.number_input("Max P", 0, value=2),
+                        "start_Q": st.number_input("Min Q", 0, value=0),
+                        "max_Q": st.number_input("Max Q", 0, value=2),
+                        "D": st.number_input("Seasonal differencing (D)", 0, value=1),
+                        "sp": st.number_input("Seasonal periods (sp)", 1, value=12)
+                    })
+            elif model_choice == "LSTM":
                 st.subheader("Advanced LSTM Settings")
                 lstm_params.update({
                     "num_layers": st.number_input("Number of LSTM layers", 1, 10, value=1),
@@ -232,6 +260,29 @@ def main():
                             y_pred=y_pred_series,
                             y_forecast=y_forecast,
                             title="LSTM Forecast",
+                            metrics=metrics
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                elif model_choice in ["ETS", "ARIMA"]:
+                    with st.spinner(f"Running {model_choice} Forecast..."):
+                        y_train, y_test = manual_train_test_split(y, train_size)
+                        fh_test = ForecastingHorizon(y_test.index, is_relative=False)
+                        fh_forecast = ForecastingHorizon(
+                            pd.date_range(start=y.index[-1], periods=forecast_periods + 1, freq=y.index.freq)[1:],
+                            is_relative=False,
+                        )
+                        y_pred = run_forecast(y_train, model_choice, fh_test, **model_params)
+                        y_forecast = run_forecast(y_train, model_choice, fh_forecast, **model_params)
+
+                        # Calculate metrics
+                        mae, rmse, smape = calculate_metrics(y_test, y_pred)
+                        metrics = (mae, rmse, smape)
+
+                        # Plot results
+                        st.subheader(f"{model_choice} Forecast for {target_variable}")
+                        fig = plot_interactive_forecast(
+                            y_train, y_test, y_pred, y_forecast,
+                            f"{model_choice} Forecast for {target_variable}",
                             metrics=metrics
                         )
                         st.plotly_chart(fig, use_container_width=True)
