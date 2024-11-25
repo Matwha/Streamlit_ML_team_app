@@ -88,7 +88,7 @@ def ensure_frequency(df):
     return df
 
 
-def lstm_forecast(df, target_variable, train_size=0.8, look_back=3, epochs=200, batch_size=32, lstm_params=None):
+def lstm_forecast_with_future(df, target_variable, train_size=0.8, look_back=3, epochs=200, batch_size=32, lstm_params=None, forecast_periods=12):
     # Data Preprocessing
     scaler = MinMaxScaler(feature_range=(0, 1))
     df[target_variable] = scaler.fit_transform(df[target_variable].values.reshape(-1, 1))
@@ -134,12 +134,33 @@ def lstm_forecast(df, target_variable, train_size=0.8, look_back=3, epochs=200, 
     # Train Model
     model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, verbose=2)
 
-    # Predictions
+    # Predictions on Test Set
     y_pred = model.predict(X_test)
     y_pred = scaler.inverse_transform(y_pred)
     y_test = scaler.inverse_transform(y_test.reshape(-1, 1))
-    
-    return y_pred, y_test, model
+
+    # Future Forecasting
+    future_predictions = []
+    last_sequence = X_test[-1]  # Start with the last sequence from the test data
+
+    for _ in range(forecast_periods):
+        next_prediction = model.predict(last_sequence.reshape(1, look_back, 1))  # Predict the next step
+        next_prediction_scaled = scaler.inverse_transform(next_prediction)  # Inverse transform the prediction
+        future_predictions.append(next_prediction_scaled[0, 0])  # Save the prediction
+
+        # Update the input sequence: remove the first value and append the new prediction
+        next_input = np.append(last_sequence[1:], next_prediction, axis=0)
+        last_sequence = next_input
+
+    future_index = pd.date_range(
+        start=df.index[-1], 
+        periods=forecast_periods + 1, 
+        freq=pd.infer_freq(df.index)
+    )[1:]  # Create future timestamps
+
+    future_series = pd.Series(future_predictions, index=future_index)
+
+    return y_pred, y_test, future_series, model
 
 def main():
     st.set_page_config(layout="wide")
@@ -155,35 +176,7 @@ def main():
         model_params = {}
         lstm_params = {}
         if advanced_settings:
-            if model_choice == "ETS":
-                st.subheader("Advanced ETS Settings")
-                model_params.update({
-                    "error": st.selectbox("Error type", ["add", "mul"]),
-                    "trend": st.selectbox("Trend type", ["add", "mul", None]),
-                    "seasonal": st.selectbox("Seasonal type", ["add", "mul", None]),
-                    "damped_trend": st.checkbox("Damped trend", False),
-                    "sp": st.number_input("Seasonal periods", min_value=1, value=1)
-                })
-            elif model_choice == "ARIMA":
-                st.subheader("Advanced ARIMA Settings")
-                model_params.update({
-                    "start_p": st.number_input("Min p", 0, value=0),
-                    "max_p": st.number_input("Max p", 0, value=5),
-                    "start_q": st.number_input("Min q", 0, value=0),
-                    "max_q": st.number_input("Max q", 0, value=5),
-                    "d": st.number_input("Differencing (d)", 0, value=1),
-                    "seasonal": st.checkbox("Seasonal", True)
-                })
-                if model_params["seasonal"]:
-                    model_params.update({
-                        "start_P": st.number_input("Min P", 0, value=0),
-                        "max_P": st.number_input("Max P", 0, value=2),
-                        "start_Q": st.number_input("Min Q", 0, value=0),
-                        "max_Q": st.number_input("Max Q", 0, value=2),
-                        "D": st.number_input("Seasonal differencing (D)", 0, value=1),
-                        "sp": st.number_input("Seasonal periods (sp)", 1, value=12)
-                    })
-            elif model_choice == "LSTM":
+            if model_choice == "LSTM":
                 st.subheader("Advanced LSTM Settings")
                 lstm_params.update({
                     "num_layers": st.number_input("Number of LSTM layers", 1, 10, value=1),
@@ -216,12 +209,13 @@ def main():
             if st.button("Run Forecast"):
                 if model_choice == "LSTM":
                     with st.spinner("Running LSTM Forecast..."):
-                        y_pred, y_test, _ = lstm_forecast(
+                        y_pred, y_test, y_forecast, _ = lstm_forecast_with_future(
                             df, target_variable, train_size=train_size,
                             look_back=lstm_params.get("look_back", 3),
                             epochs=lstm_params.get("epochs", 200),
                             batch_size=lstm_params.get("batch_size", 32),
-                            lstm_params=lstm_params
+                            lstm_params=lstm_params,
+                            forecast_periods=forecast_periods
                         )
                         y_test_series = pd.Series(y_test.flatten(), index=y.iloc[-len(y_test):].index)
                         y_pred_series = pd.Series(y_pred.flatten(), index=y.iloc[-len(y_test):].index)
@@ -236,31 +230,8 @@ def main():
                             y_train=y[:int(len(y) * train_size)],
                             y_test=y_test_series,
                             y_pred=y_pred_series,
-                            y_forecast=None,
+                            y_forecast=y_forecast,
                             title="LSTM Forecast",
-                            metrics=metrics
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-                elif model_choice in ["ETS", "ARIMA"]:
-                    with st.spinner(f"Running {model_choice} Forecast..."):
-                        y_train, y_test = manual_train_test_split(y, train_size)
-                        fh_test = ForecastingHorizon(y_test.index, is_relative=False)
-                        fh_forecast = ForecastingHorizon(
-                            pd.date_range(start=y.index[-1], periods=forecast_periods + 1, freq=y.index.freq)[1:],
-                            is_relative=False,
-                        )
-                        y_pred = run_forecast(y_train, model_choice, fh_test, **model_params)
-                        y_forecast = run_forecast(y_train, model_choice, fh_forecast, **model_params)
-
-                        # Calculate metrics
-                        mae, rmse, smape = calculate_metrics(y_test, y_pred)
-                        metrics = (mae, rmse, smape)
-
-                        # Plot results
-                        st.subheader(f"{model_choice} Forecast for {target_variable}")
-                        fig = plot_interactive_forecast(
-                            y_train, y_test, y_pred, y_forecast,
-                            f"{model_choice} Forecast for {target_variable}",
                             metrics=metrics
                         )
                         st.plotly_chart(fig, use_container_width=True)
