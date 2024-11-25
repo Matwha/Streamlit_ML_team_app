@@ -183,7 +183,7 @@ def main():
                     "trend": st.selectbox("Trend type", ["add", "mul", None]),
                     "seasonal": st.selectbox("Seasonal type", ["add", "mul", None]),
                     "damped_trend": st.checkbox("Damped trend", False),
-                    "sp": st.number_input("Seasonal periods", min_value=1, value=1)
+                    "sp": st.number_input("Seasonal periods", min_value=1, value=2)
                 })
             elif model_choice == "ARIMA":
                 st.subheader("Advanced ARIMA Settings")
