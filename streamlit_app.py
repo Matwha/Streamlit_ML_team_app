@@ -98,7 +98,7 @@ def explore_data(df):
     st.subheader("Numerical Columns Statistics")
     st.dataframe(df.describe())
 
-    # Time series visualization
+    # Time series utils
     st.subheader("Time Series Visualization")
     if isinstance(df.index, pd.DatetimeIndex):
         time_index = df.index

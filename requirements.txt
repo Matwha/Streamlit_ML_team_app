@@ -1,10 +1,29 @@
-streamlit>=1.40.0
-pandas>=2.1.0
-numpy>=1.26.0
-plotly>=5.24.0
-scikit-learn>=1.4.0
-pycaret>=3.3.0
-sktime>=0.26.0
-pmdarima>=2.0.0  # For ARIMA models
-prophet>=1.1.0   # For Prophet models
-tensorflow>=2.17.0  # If using LSTM models
+# Core dependencies
+streamlit==1.24.0
+pandas==1.5.3
+numpy==1.23.5
+
+# Machine Learning
+scikit-learn==1.0.2
+tensorflow==2.12.0
+xgboost==1.7.5
+statsmodels==0.13.5
+pmdarima==2.0.3
+
+# Visualization
+matplotlib==3.7.1
+seaborn==0.12.2
+plotly==5.13.1
+
+# Statistics and Scientific Computing
+scipy==1.9.3
+
+# Development dependencies
+pytest==7.3.1
+black==23.3.0
+flake8==6.0.0
+isort==5.12.0
+
+# Optional dependencies for enhanced functionality
+optuna==3.1.1  # For hyperparameter optimization
+dask==2023.5.0  # For parallel computing
