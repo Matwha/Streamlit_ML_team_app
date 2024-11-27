@@ -27,7 +27,6 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 def main():
     """Main application function."""
     setup_logging()
-    st.set_page_config(layout="wide", page_title=APP_TITLE)
     st.set_page_config(layout="wide", page_title="Time Series Forecasting App")
 
     # Title and description
