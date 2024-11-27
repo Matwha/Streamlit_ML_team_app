@@ -19,7 +19,6 @@ A comprehensive Streamlit application for time series forecasting using various 
 
 1. Clone the repository:
 ```bash
-git clone https://github.com
 cd Streamlit_ML_team_app
 ```
 
