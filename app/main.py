@@ -1,512 +1,315 @@
 """Main Streamlit application for time series forecasting."""
+import streamlit as st
+import plotly.graph_objects as go
 import tensorflow as tf
+import pandas as pd
+import numpy as np
+from models.trainer import ModelTrainer
 from dataclasses import dataclass
 from typing import Optional, Dict, Any
-from tensorflow import keras
-import plotly.graph_objects as go
-import numpy as np
-import matplotlib.pyplot as plt
-from models.traditional import ARIMAModel, SARIMAModel
-from models.machine_learning import RandomForestModel, XGBoostModel
-from models.deep_learning import SimpleRNNModel, LSTMModel, StackedModel
-from config import (TRADITIONAL_MODELS, ML_MODELS, DL_MODELS, APP_TITLE, 
-                   APP_DESCRIPTION, DEFAULT_GITHUB_REPO, MODEL_CATEGORIES,
-                   EXAMPLE_DATA_URL)  # Add this import
-import streamlit as st
-import pandas as pd
+from data.preprocessor import TimeSeriesPreprocessor
+
+from config import APP_TITLE, APP_DESCRIPTION, DEFAULT_GITHUB_REPO
 from data.loader import DataLoader
-from utils.visualization import DataVisualizer
-from utils.helpers import setup_environment, validate_data
 from data.data_analyzer import TimeSeriesAnalyzer
+from models.evaluation import PredictionDisplayManager
+from models.traditional import create_traditional_model
+from models.machine_learning import create_ml_model
+from models.deep_learning import SimpleRNNModel, LSTMModel, StackedModel, SequentialModel
+from utils.helpers import (
+    setup_environment,
+    validate_data,
+    setup_model_selection,
+    get_model_parameters,
+    display_data_analysis_tabs
+)
 
-
-setup_environment()
-
-# Replace the existing AnalysisState class and main() definition with:
 
 @dataclass
-class AnalysisState:
-    """Class to store analysis state"""
-    results: Optional[Dict[str, Any]] = None
-    display_format: str = "Table"
-    show_ci: bool = False
-    ci_level: float = 95.0
-    has_run: bool = False
+class AppState:
+    """Class to store application state."""
+    analysis_complete: bool = False
+    selected_model: Optional[str] = None
+    target_column: Optional[str] = None
+    trained_model: Any = None
+    results: Optional[Dict] = None
 
-def main():
-    """Main application function"""
-    st.set_page_config(layout="wide", page_title="Time Series Forecasting App")
-    st.title(APP_TITLE)
-    st.markdown(APP_DESCRIPTION)
 
-    # Initialize classes
-    data_loader = DataLoader()
-    data_visualizer = DataVisualizer()
+class TimeSeriesApp:
+    """Main application class for time series forecasting."""
 
-    # Initialize session state if needed
-    if 'analysis_state' not in st.session_state:
-        st.session_state.analysis_state = AnalysisState()
+    def __init__(self):
+        """Initialize application components."""
+        setup_environment()
+        self.data_loader = DataLoader()
+        self.display_manager = PredictionDisplayManager()
 
-    # Data Source Selection
-    st.sidebar.header("1. Data Source")
-    data_source = st.sidebar.radio(
-        "Select data source",
-        ["GitHub Repository", "Upload File", "Example Data"]
-    )
+        # Initialize session state
+        if 'app_state' not in st.session_state:
+            st.session_state.app_state = AppState()
 
-    df = None
-    if data_source == "GitHub Repository":
-        github_url = st.sidebar.text_input("GitHub repository URL", DEFAULT_GITHUB_REPO)
-        if github_url:
-            csv_files = data_loader.get_github_files(github_url)
-            if csv_files:
-                selected_file = st.sidebar.selectbox("Select CSV file",
-                                                   [file[0] for file in csv_files])
-                if selected_file:
-                    file_url = next(file[1] for file in csv_files if file[0] == selected_file)
-                    df = data_loader.load_data("github", github_url=github_url, selected_file=file_url)
+    def setup_page(self):
+        """Configure page settings and display title."""
+        st.set_page_config(layout="wide", page_title=APP_TITLE)
+        st.title(APP_TITLE)
+        st.markdown(APP_DESCRIPTION)
 
-    elif data_source == "Upload File":
-        uploaded_file = st.sidebar.file_uploader("Upload CSV file", type=['csv'])
-        if uploaded_file:
-            df = data_loader.load_data("upload", uploaded_file=uploaded_file)
+    def load_data(self) -> Optional[pd.DataFrame]:
+        """Handle data loading from various sources."""
+        st.sidebar.header("1. Data Source")
+        data_source = st.sidebar.radio(
+            "Select data source",
+            ["GitHub Repository", "Upload File", "Example Data"]
+        )
 
-    else:  # Example Data
-        df = data_loader.load_example_data(EXAMPLE_DATA_URL)
-        st.sidebar.info("Using example stock price data")
+        df = None
+        if data_source == "GitHub Repository":
+            github_url = st.sidebar.text_input("GitHub repository URL", DEFAULT_GITHUB_REPO)
+            if github_url:
+                csv_files = self.data_loader.get_github_files(github_url)
+                if csv_files:
+                    selected_file = st.sidebar.selectbox(
+                        "Select CSV file",
+                        [file[0] for file in csv_files]
+                    )
+                    if selected_file:
+                        file_url = next(file[1] for file in csv_files
+                                        if file[0] == selected_file)
+                        df = self.data_loader.load_data(
+                            "github",
+                            github_url=github_url,
+                            selected_file=file_url
+                        )
 
-    if df is not None and data_loader.validate_data(df):
-        # Add target column selection
+        elif data_source == "Upload File":
+            uploaded_file = st.sidebar.file_uploader("Upload CSV file", type=['csv'])
+            if uploaded_file:
+                df = self.data_loader.load_data("upload", uploaded_file=uploaded_file)
+
+        else:  # Example Data
+            df = self.data_loader.load_example_data()
+            st.sidebar.info("Using example data")
+
+        return df
+
+    def select_target_column(self, df: pd.DataFrame) -> Optional[str]:
+        """Allow user to select target column for analysis."""
         target_column = st.sidebar.selectbox(
             "Select Target Column",
             df.columns.tolist()
         )
+        return target_column
 
-        # Data Analysis Section
+    def analyze_data(self, df: pd.DataFrame, target_column: str):
+        """Perform data analysis and display results."""
         st.header("2. Data Analysis")
-
-        # Initialize TimeSeriesAnalyzer
         analyzer = TimeSeriesAnalyzer(df)
+        display_data_analysis_tabs(analyzer, target_column)
 
-        analysis_tabs = st.tabs([
-            "Basic Statistics",
-            "Time Series Properties",
-            "Data Quality",
-            "Feature Engineering"
-        ])
-
-        with analysis_tabs[0]:
-            st.subheader("Basic Statistical Analysis")
-            stats = analyzer.analyze_basic_stats(target_column)
-
-            # Display basic info first
-            st.write("##### Data Information")
-            st.write(f"- Data Type: {stats['Data Type']}")
-            st.write(f"- Is Numeric: {stats['Is Numeric']}")
-
-            if not stats['Is Numeric']:
-                if 'Start Date' in stats:  # Check if it's a datetime column
-                    st.write("##### Date Range Information")
-                    st.write(f"- Start Date: {stats['Start Date']}")
-                    st.write(f"- End Date: {stats['End Date']}")
-                    st.write(f"- Date Range (days): {stats['Date Range (days)']}")
-                    st.write(f"- Number of Unique Dates: {stats['Number of Unique Dates']}")
-                    if 'Missing Values' in stats:
-                        st.write(f"- Missing Values: {stats['Missing Values']}")
-                    if 'Note' in stats:
-                        st.info(stats['Note'])
-
-                    # Add visualization for date-based data
-                    st.write("##### Data Analysis Visualization")
-                    try:
-                        analyzer.plot_analysis_results(target_column)
-                    except Exception as e:
-                        st.warning("Could not generate visualizations. Some analyses may not be applicable to date columns.")
-                else:
-                    st.warning("Selected column contains non-numeric data. Limited analysis available.")
-                    st.write("##### Sample Values")
-                    st.write(stats['Sample Values'])
-                    if 'Most Common Values' in stats:
-                        st.write("##### Most Common Values")
-                        st.write(stats['Most Common Values'])
-                if 'Note' in stats:
-                    st.info(stats['Note'])
-            else:
-                # Display numeric statistics
-                numeric_stats = {k: v for k, v in stats.items()
-                               if k not in ['Data Type', 'Is Numeric', 'Sample Values', 'Note']}
-                st.write("##### Statistical Measures")
-                st.write(pd.DataFrame([numeric_stats]).T)
-
-                # Add visualization for numeric data
-                st.write("##### Data Analysis Visualization")
-                analyzer.plot_analysis_results(target_column)
-
-        with analysis_tabs[1]:
-            st.subheader("Time Series Properties")
-
-            if not stats['Is Numeric']:
-                st.warning("Time series analysis requires numeric data. Please select a numeric column.")
-            else:
-                # Stationarity Analysis
-                st.write("##### Stationarity Tests")
-                stationarity = analyzer.check_stationarity(target_column)
-
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.write("ADF Test Results:")
-                    st.write(f"- Statistic: {stationarity['ADF']['statistic']:.4f}")
-                    st.write(f"- p-value: {stationarity['ADF']['p-value']:.4f}")
-                    st.write(f"- Is Stationary: {stationarity['ADF']['is_stationary']}")
-
-                with col2:
-                    st.write("KPSS Test Results:")
-                    st.write(f"- Statistic: {stationarity['KPSS']['statistic']:.4f}")
-                    st.write(f"- p-value: {stationarity['KPSS']['p-value']:.4f}")
-                    st.write(f"- Is Stationary: {stationarity['KPSS']['is_stationary']}")
-
-                if stationarity['recommendations']:
-                    st.write("##### Recommendations:")
-                    for rec in stationarity['recommendations']:
-                        st.write(f"- {rec}")
-
-                # Seasonality Analysis
-                st.write("##### Seasonality Analysis")
-                seasonality = analyzer.detect_seasonality(target_column)
-                st.write(f"- Has Seasonality: {seasonality['has_seasonality']}")
-                st.write(f"- Seasonal Strength: {seasonality['seasonal_strength']:.4f}")
-                st.write(f"- Suggested Period: {seasonality['suggested_period']}")
-
-        with analysis_tabs[2]:
-            st.subheader("Data Quality Analysis")
-
-            # Missing Values Analysis
-            st.write("##### Missing Values Analysis")
-            missing = analyzer.analyze_missing_values(target_column)
-            st.write(f"- Total Missing: {missing['total_missing']}")
-            st.write(f"- Percentage Missing: {missing['percentage_missing']:.2f}%")
-
-            if missing['recommendations']:
-                st.write("Imputation Recommendations:")
-                for rec in missing['recommendations']:
-                    st.write(f"- {rec}")
-
-            # Outlier Analysis
-            if stats['Is Numeric']:
-                st.write("##### Outlier Analysis")
-                outliers = analyzer.detect_outliers(target_column)
-                st.write(f"- Number of Outliers: {outliers['count']}")
-                st.write(f"- Percentage of Outliers: {outliers['percentage']:.2f}%")
-                st.write(f"- Detection Method: {outliers['method']}")
-            else:
-                st.info("Outlier analysis is only available for numeric columns.")
-
-        with analysis_tabs[3]:
-            st.subheader("Feature Engineering Recommendations")
-
-            if not stats['Is Numeric']:
-                st.warning("Feature engineering recommendations require numeric data.")
-            else:
-                recommendations = analyzer.generate_feature_recommendations(target_column)
-
-                for rec in recommendations:
-                    st.write(f"##### {rec['type'].replace('_', ' ').title()}")
-                    st.write(rec['description'])
-
-                    if 'suggested_windows' in rec:
-                        st.write("Suggested window sizes:", rec['suggested_windows'])
-                    if 'suggested_lags' in rec:
-                        st.write("Suggested lag values:", rec['suggested_lags'])
-                    if 'suggested_differences' in rec:
-                        st.write("Suggested differences:", rec['suggested_differences'])
-
-        # Visualization
-        st.header("Data Analysis Visualization")
-        if stats['Is Numeric']:
-            analyzer.plot_analysis_results(target_column)
-        else:
-            st.warning("Visualizations are only available for numeric columns.")
-
-        # Model Analysis Section
+    def setup_model(self):
+        """Configure model selection and parameters."""
         st.header("3. Model Selection")
+        available_models, model_name = setup_model_selection()
 
-        # Only show model selection if we have numeric data or datetime data
-        if not stats['Is Numeric'] and 'Start Date' not in stats:
-            st.warning("Model analysis requires numeric or datetime data. Please select an appropriate column.")
+        if model_name is None:
+            return None, None
+
+        # Get model parameters based on selection
+        params = get_model_parameters(model_name)
+
+        # Ensure params has the correct structure
+        if params is not None and not isinstance(params, dict):
+            params = {'build_params': params, 'train_params': {}}
+        elif params is not None and 'build_params' not in params:
+            params = {'build_params': params, 'train_params': {}}
+
+        return model_name, params
+
+    def create_model(self, model_name: str, model_params: Dict):
+        """Create model instance based on model type."""
+        try:
+            if model_name in ['Simple RNN', 'LSTM', 'Stacked LSTM+RNN', 'Sequential']:
+                # Extract initialization parameters
+                init_params = {
+                    'sequence_length': model_params['build_params'].pop('sequence_length', 10),
+                    'n_features': model_params['build_params'].pop('n_features', 1)
+                }
+
+                model_class = {
+                    'Simple RNN': SimpleRNNModel,
+                    'LSTM': LSTMModel,
+                    'Stacked LSTM+RNN': StackedModel,
+                    'Sequential': SequentialModel
+                }[model_name]
+
+                # Create model instance with init params
+                model = model_class(name=model_name, **init_params)
+
+                # Build model with build parameters only
+                model.build(**model_params['build_params'])
+
+                # Store training parameters in the model instance for later use
+                model.train_params = model_params['train_params']
+
+                return model
+
+            elif model_name in ['ARIMA', 'SARIMA']:
+                return create_traditional_model(model_name, **model_params['build_params'])
+            else:
+                return create_ml_model(model_name, **model_params['build_params'])
+
+        except Exception as e:
+            st.error(f"Error creating model: {str(e)}")
+            return None
+
+    # In main.py, replace or modify the train_and_evaluate method:
+
+    def train_and_evaluate(self, df: pd.DataFrame, target_column: str, model_name: str, model_params: Dict):
+        """Train model and evaluate results."""
+        try:
+            # Create model instance
+            model = self.create_model(model_name, model_params)
+            if model is None:
+                return None, None, None
+
+            # Create trainer instance
+            trainer = ModelTrainer(model, target_column)
+
+            # Train and evaluate
+            return trainer.train_and_evaluate(df, model_name, model_params)
+
+        except Exception as e:
+            st.error(f"Error in model training and evaluation: {str(e)}")
+            with st.expander("🔍 Debug: Error Details", expanded=True):
+                st.error(f"Error Type: {type(e).__name__}")
+                st.error(f"Error Message: {str(e)}")
+                import traceback
+                st.code(traceback.format_exc())
+            return None, None, None
+
+    def run(self):
+        """Run the main application."""
+        self.setup_page()
+
+        # Load data
+        df = self.load_data()
+        if df is None or not validate_data(df)[0]:
             return
 
-        # Model category selection
-        selected_categories = st.sidebar.multiselect(
-            "Select Model Categories",
-            MODEL_CATEGORIES,
-            default=['Traditional']
-        )
+        # Select target column
+        target_column = self.select_target_column(df)
+        if target_column is None:
+            return
 
-        # Build available models list based on selected categories
-        available_models = []
-        if 'Traditional' in selected_categories:
-            available_models.extend(TRADITIONAL_MODELS)
-        if 'Machine Learning' in selected_categories:
-            available_models.extend(ML_MODELS)
-        if 'Deep Learning' in selected_categories:
-            available_models.extend(DL_MODELS)
+        # Initialize preprocessor and get options
+        preprocessor = TimeSeriesPreprocessor()
+        preprocessing_options = preprocessor.add_preprocessing_controls()
 
-        # Initialize model_name
-        model_name = None
+        # Analyze original data before preprocessing
+        self.analyze_data(df, target_column)
 
-        if not available_models:
-            st.warning("Please select at least one model category.")
-        else:
-            # Model selection dropdown
-            model_name = st.sidebar.selectbox(
-                "Select Model",
-                available_models
+        # Setup model
+        model_name, model_params = self.setup_model()
+        if model_name is None:
+            return
+
+        # Add display and prediction controls
+        display_options = st.sidebar.expander("Display & Prediction Options", expanded=True)
+        with display_options:
+            # Display settings
+            display_type = st.selectbox(
+                "Display Predictions As",
+                ["Table", "Graph", "Both"]
             )
 
-            # Model Parameters section
-            model_params = {}
-            with st.sidebar.expander(f"{model_name} Parameters", expanded=True):
-                if model_name == 'ARIMA':
-                    st.subheader("ARIMA Parameters")
-                    model_params[model_name] = {
-                        'p': st.slider(f'AR order (p)', 0, 5, 1),
-                        'd': st.slider(f'Differencing order (d)', 0, 2, 1),
-                        'q': st.slider(f'MA order (q)', 0, 5, 1)
-                    }
-                elif model_name == 'SARIMA':
-                    st.subheader("SARIMA Parameters")
-                    model_params[model_name] = {
-                        'p': st.slider(f'AR order (p)', 0, 5, 1),
-                        'd': st.slider(f'Differencing order (d)', 0, 2, 1),
-                        'q': st.slider(f'MA order (q)', 0, 5, 1),
-                        'P': st.slider(f'Seasonal AR order (P)', 0, 2, 1),
-                        'D': st.slider(f'Seasonal differencing (D)', 0, 1, 1),
-                        'Q': st.slider(f'Seasonal MA order (Q)', 0, 2, 1),
-                        's': st.select_slider(f'Seasonal period (s)', options=[4, 7, 12], value=12)
-                    }
-                elif model_name == 'Random Forest':
-                    st.subheader("Random Forest Parameters")
-                    model_params[model_name] = {
-                        'n_estimators': st.slider('Number of Trees', 10, 200, 100),
-                        'max_depth': st.slider('Max Tree Depth', 2, 30, 10),
-                        'min_samples_split': st.slider('Min Samples Split', 2, 20, 2),
-                        'random_state': 42
-                    }
-                elif model_name == 'XGBoost':
-                    st.subheader("XGBoost Parameters")
-                    model_params[model_name] = {
-                        'n_estimators': st.slider('Number of Trees', 10, 200, 100),
-                        'max_depth': st.slider('Max Tree Depth', 2, 30, 6),
-                        'learning_rate': st.slider('Learning Rate', 0.01, 0.3, 0.1, 0.01),
-                        'random_state': 42
-                    }
-                elif model_name in ['Simple RNN', 'LSTM', 'Stacked LSTM+RNN']:
-                    st.subheader(f"{model_name} Parameters")
-                    model_params[model_name] = {
-                        'sequence_length': st.slider('Sequence Length', 5, 50, 10),
-                        'units': st.slider('Hidden Units', 8, 128, 32, 8),
-                        'dropout_rate': st.slider('Dropout Rate', 0.0, 0.5, 0.1, 0.1),
-                        'epochs': st.slider('Training Epochs', 10, 200, 50),
-                        'batch_size': st.select_slider('Batch Size', options=[16, 32, 64, 128], value=32)
-                    }
-                elif model_name == 'Sequential':
-                    st.subheader("Sequential Model Parameters")
-
-                    # Base parameters
-                    sequence_length = st.slider('Sequence Length', 5, 50, 10)
-                    learning_rate = st.slider('Learning Rate', 0.0001, 0.01, 0.001, 0.0001)
-
-                    # Layer configuration
-                    n_layers = st.slider('Number of Layers', 1, 5, 2)
-                    layer_configs = []
-
-                    for i in range(n_layers):
-                        st.write(f"Layer {i + 1}")
-                        col1, col2, col3, col4 = st.columns(4)
-                        with col1:
-                            layer_type = st.selectbox(
-                                f'Type {i + 1}',
-                                ['Dense', 'LSTM', 'GRU'],
-                                key=f'layer_type_{i}'
-                            )
-                        with col2:
-                            units = st.number_input(
-                                f'Units {i + 1}',
-                                min_value=1,
-                                max_value=256,
-                                value=64,
-                                key=f'units_{i}'
-                            )
-                        with col3:
-                            activation = st.selectbox(
-                                f'Activation {i + 1}',
-                                ['relu', 'tanh', 'sigmoid'],
-                                key=f'activation_{i}'
-                            )
-                        with col4:
-                            dropout = st.slider(
-                                f'Dropout {i + 1}',
-                                0.0, 0.5, 0.1,
-                                key=f'dropout_{i}'
-                            )
-                        layer_configs.append({
-                            'type': layer_type,
-                            'units': units,
-                            'activation': activation,
-                            'dropout': dropout
-                        })
-
-                    model_params[model_name] = {
-                        'sequence_length': sequence_length,
-                        'learning_rate': learning_rate,
-                        'layer_configs': layer_configs,
-                        'epochs': st.slider('Training Epochs', 10, 200, 50),
-                        'batch_size': st.select_slider('Batch Size', options=[16, 32, 64, 128], value=32)
-                    }
-
-# Initialize analysis state
-            if not hasattr(st.session_state, 'analysis_state'):
-                st.session_state.analysis_state = AnalysisState()
-                st.session_state.analysis_state.display_format = "Table"
-                st.session_state.analysis_state.show_ci = False
-                st.session_state.analysis_state.ci_level = 95.0
-                st.session_state.analysis_state.has_run = False
-                st.session_state.analysis_state.results = None
-
-            # Display Settings
-            st.sidebar.header("4. Display Settings")
-
-            # Add display format selection (persisting previous selection)
-            display_format = st.sidebar.selectbox(
-                "Select Display Format",
-                ["Table", "Plot", "Both"],
-                index=["Table", "Plot", "Both"].index(st.session_state.analysis_state.display_format)
-            )
-            st.session_state.analysis_state.display_format = display_format
-
-            # Add confidence interval option (persisting previous selection)
-            show_ci = st.sidebar.checkbox(
-                "Show Confidence Intervals",
-                value=st.session_state.analysis_state.show_ci
-            )
-            st.session_state.analysis_state.show_ci = show_ci
-
-            if show_ci:
-                ci_level = st.sidebar.slider(
-                    "Confidence Level (%)",
-                    80, 99,
-                    value=int(st.session_state.analysis_state.ci_level),
-                    key='ci_slider'
+            # Confidence interval settings
+            show_intervals = st.checkbox("Show Confidence Intervals", value=False)
+            if show_intervals:
+                confidence_level = st.slider(
+                    "Confidence Level",
+                    min_value=0.8,
+                    max_value=0.99,
+                    value=0.95,
+                    step=0.01
                 )
-                st.session_state.analysis_state.ci_level = float(ci_level)
+                interval_method = st.selectbox(
+                    "Interval Method",
+                    ["Bootstrap", "Quantile", "Analytical"]
+                )
+                if interval_method == "Bootstrap":
+                    n_iterations = st.slider(
+                        "Bootstrap Iterations",
+                        min_value=100,
+                        max_value=1000,
+                        value=500,
+                        step=100
+                    )
 
-            # Add number of future predictions
-            n_predictions = st.sidebar.number_input(
-                "Number of Future Predictions",
-                min_value=1,
-                max_value=100,
-                value=10
-            )
+                # Add interval settings to model parameters
+                if 'train_params' not in model_params:
+                    model_params['train_params'] = {}
 
-            # Run Analysis Button
-            run_analysis = st.button("Run Analysis")
-            if run_analysis:
-                st.session_state.analysis_state.has_run = True
+                model_params['train_params'].update({
+                    'return_intervals': show_intervals,
+                    'confidence_level': confidence_level if show_intervals else None,
+                    'interval_method': interval_method if show_intervals else None,
+                    'n_iterations': n_iterations if show_intervals and interval_method == "Bootstrap" else None
+                })
 
-            if st.session_state.analysis_state.has_run:
-                try:
-                    st.info(f"Starting {model_name} analysis...")
+        # Additional display controls from display manager
+        display_settings = self.display_manager.add_sidebar_controls()
 
-                    # Prepare data based on model type
-                    train_data = None
-                    test_data = None
-                    if model_name in TRADITIONAL_MODELS:
-                        train_data, test_data = data_loader.prepare_traditional_data(df, target_column)
-                    elif model_name in ML_MODELS:
-                        train_data, test_data = data_loader.prepare_ml_data(df, target_column)
-                    elif model_name in DL_MODELS:
-                        train_data, test_data = data_loader.prepare_dl_data(df, target_column)
+        # Store display preferences in session state
+        if 'display_settings' not in st.session_state:
+            st.session_state.display_settings = {}
 
-                    if train_data is not None and test_data is not None:
-                        # Initialize model
-                        model = None
-                        if model_name == 'ARIMA':
-                            model = ARIMAModel()
-                            model.build(**model_params[model_name])
-                        elif model_name == 'SARIMA':
-                            model = SARIMAModel()
-                            model.build(**model_params[model_name])
+        st.session_state.display_settings.update({
+            'display_type': display_type,
+            'show_intervals': show_intervals,
+            'confidence_level': confidence_level if show_intervals else None,
+            'interval_method': interval_method if show_intervals else None,
+            'n_iterations': n_iterations if show_intervals and interval_method == "Bootstrap" else None
+        })
 
-                        if model is not None:
-                            # Train model
-                            st.write("Training model...")
-                            model = model.train(train_data)
+        # Train and evaluate
+        if st.button("Run Analysis"):
+            with st.spinner("Running analysis..."):
+                # Train and evaluate with original dataframe
+                model, results_df, metrics = self.train_and_evaluate(
+                    df=df,
+                    target_column=target_column,
+                    model_name=model_name,
+                    model_params=model_params
+                )
 
-                            if model is not None:
-                                # Make predictions
-                                st.write("Making predictions...")
-                                predictions = model.predict(len(test_data))
+                if model is not None:
+                    st.session_state.app_state.analysis_complete = True
+                    st.session_state.app_state.trained_model = model
+                    st.session_state.app_state.results = {
+                        'df': results_df,
+                        'metrics': metrics
+                    }
 
-                                if predictions is not None:
-                                    # Create results DataFrame
-                                    results_df = pd.DataFrame({
-                                        'Actual': test_data,
-                                        'Predicted': predictions
-                                    })
+                    # Display results based on selected display type
+                    if display_type in ["Table", "Both"]:
+                        st.subheader("Prediction Results - Table View")
+                        st.dataframe(results_df)
 
-                                    # Calculate confidence intervals if requested
-                                    if show_ci:
-                                        lower, upper = model.calculate_prediction_intervals(ci_level/100)
-                                        if lower is not None and upper is not None:
-                                            results_df['Lower Bound'] = lower
-                                            results_df['Upper Bound'] = upper
+                    if display_type in ["Graph", "Both"]:
+                        st.subheader("Prediction Results - Graph View")
+                        self.display_manager.plot_predictions(
+                            results_df,
+                            show_intervals=show_intervals,
+                            model_name=model_name
+                        )
 
-                                    # Store results in session state
-                                    st.session_state.analysis_state.results = {
-                                        'df': results_df,
-                                        'metrics': model.evaluate(test_data)
-                                    }
+                    # Display metrics
+                    st.subheader("Model Performance Metrics")
+                    self.display_manager.display_metrics(metrics)
 
-                                    # Display results based on format selection
-                                    if display_format in ["Table", "Both"]:
-                                        st.write("Predictions:")
-                                        st.dataframe(results_df)
+                    st.success("Analysis completed successfully!")
 
-                                    if display_format in ["Plot", "Both"]:
-                                        fig, ax = plt.subplots(figsize=(10, 6))
-                                        ax.plot(test_data.index, test_data, label='Actual', color='blue')
-                                        ax.plot(test_data.index, predictions, label='Predicted', color='red')
-
-                                        if show_ci and 'Lower Bound' in results_df.columns:
-                                            ax.fill_between(test_data.index,
-                                                          results_df['Lower Bound'],
-                                                          results_df['Upper Bound'],
-                                                          color='red', alpha=0.1,
-                                                          label=f'{ci_level}% Confidence Interval')
-
-                                        ax.set_title(f'{model_name} Predictions')
-                                        ax.legend()
-                                        st.pyplot(fig)
-
-                                    # Display metrics
-                                    if st.session_state.analysis_state.results['metrics']:
-                                        st.write("\nModel Performance:")
-                                        metrics = st.session_state.analysis_state.results['metrics']
-                                        for metric, value in metrics.items():
-                                            st.metric(metric, f"{value:.4f}")
-                                else:
-                                    st.error("Error generating predictions")
-                            else:
-                                st.error("Error training model")
-                        else:
-                            st.error(f"Model {model_name} not implemented yet")
-                    else:
-                        st.error("Error preparing data for analysis")
-
-                    st.success("Analysis completed!")
-
-                except Exception as e:
-                    st.error(f"An error occurred during analysis: {str(e)}")
 
 if __name__ == "__main__":
-    main()
+    app = TimeSeriesApp()
+    app.run()

@@ -1,9 +1,9 @@
 """Data preprocessing and dataset creation functions."""
-"""Enhanced data preprocessing with prediction intervals and feature engineering."""
 
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+from typing import Dict
 from sklearn.preprocessing import StandardScaler
 import streamlit as st
 from sklearn.model_selection import TimeSeriesSplit
@@ -13,122 +13,414 @@ class TimeSeriesPreprocessor:
     """Enhanced class for preprocessing time series data."""
 
     def __init__(self):
-        self.scaler = StandardScaler()
+        """Initialize preprocessor with default settings."""
+        self.scaler = None
+        # Add default preprocessing options
+        self.preprocessing_options = {
+            'min_data_points': 100,
+            'max_missing_pct': 20,
+            'train_size': 0.8,
+            'validation_split': True,
+            'val_size': 0.2,
+            'handle_missing': 'Forward Fill',
+            'handle_outliers': False,
+            'outlier_method': 'IQR',
+            'scaling_method': 'StandardScaler',
+            'transform_method': 'None',
+            'add_date_features': True,
+            'create_lags': True,
+            'max_lags': 7,
+            'min_lags': 1,
+            'add_rolling_features': True,
+            'rolling_windows': [7, 14]
+        }
 
-    def create_features(self, df, target_col, lags=None, add_date_features=True):
-        """Create features for ML models."""
+    def add_preprocessing_controls(self):
+        """Add preprocessing control options to Streamlit sidebar."""
+        st.sidebar.header("Data Preprocessing")
+
+        options = {}
+
+        with st.sidebar.expander("Data Validation", expanded=True):
+            options['min_data_points'] = st.number_input(
+                "Minimum Required Data Points",
+                min_value=30,
+                max_value=1000,
+                value=100,
+                help="Minimum number of data points required for modeling"
+            )
+
+            options['max_missing_pct'] = st.slider(
+                "Maximum Missing Values (%)",
+                min_value=0,
+                max_value=50,
+                value=20,
+                help="Maximum percentage of missing values allowed"
+            )
+
+        with st.sidebar.expander("Data Splitting", expanded=True):
+            options['train_size'] = st.slider(
+                "Training Data Size (%)",
+                min_value=50,
+                max_value=90,
+                value=80,
+                help="Percentage of data to use for training"
+            ) / 100.0
+
+            options['validation_split'] = st.checkbox(
+                "Use Validation Split",
+                value=True,
+                help="Split training data into training and validation sets"
+            )
+
+            if options['validation_split']:
+                options['val_size'] = st.slider(
+                    "Validation Data Size (%)",
+                    min_value=10,
+                    max_value=30,
+                    value=20,
+                    help="Percentage of training data to use for validation"
+                ) / 100.0
+
+        with st.sidebar.expander("Data Cleaning", expanded=True):
+            options['handle_missing'] = st.selectbox(
+                "Handle Missing Values",
+                options=['Forward Fill', 'Backward Fill', 'Linear Interpolation', 'Mean', 'None'],
+                help="Method to handle missing values"
+            )
+
+            options['handle_outliers'] = st.checkbox(
+                "Remove Outliers",
+                value=False,
+                help="Remove statistical outliers from the data"
+            )
+
+            if options['handle_outliers']:
+                options['outlier_method'] = st.selectbox(
+                    "Outlier Detection Method",
+                    options=['IQR', 'Z-Score', 'Isolation Forest'],
+                    help="Method to detect outliers"
+                )
+
+        with st.sidebar.expander("Scaling & Transformation", expanded=True):
+            options['scaling_method'] = st.selectbox(
+                "Scaling Method",
+                options=['StandardScaler', 'MinMaxScaler', 'RobustScaler', 'None'],
+                help="Method to scale the data"
+            )
+
+            options['transform_method'] = st.selectbox(
+                "Data Transformation",
+                options=['None', 'Log', 'Square Root', 'Box-Cox'],
+                help="Transform data to handle non-linearity or non-normality"
+            )
+
+        with st.sidebar.expander("Feature Engineering", expanded=True):
+            options['add_date_features'] = st.checkbox(
+                "Add Date Features",
+                value=True,
+                help="Add year, month, day features for datetime index"
+            )
+
+            options['create_lags'] = st.checkbox(
+                "Create Lag Features",
+                value=True,
+                help="Create lagged versions of the target variable"
+            )
+
+            if options['create_lags']:
+                options['max_lags'] = st.slider(
+                    "Maximum Lag Period",
+                    min_value=1,
+                    max_value=30,
+                    value=7,
+                    help="Maximum number of lag periods to create"
+                )
+
+                options['min_lags'] = st.slider(
+                    "Minimum Required Periods",
+                    min_value=1,
+                    max_value=options['max_lags'],
+                    value=1,
+                    help="Minimum number of lag periods required"
+                )
+
+            options['add_rolling_features'] = st.checkbox(
+                "Add Rolling Statistics",
+                value=True,
+                help="Add rolling mean and standard deviation"
+            )
+
+            if options['add_rolling_features']:
+                options['rolling_windows'] = st.multiselect(
+                    "Rolling Window Sizes",
+                    options=[3, 7, 14, 30],
+                    default=[7, 14],
+                    help="Window sizes for rolling statistics"
+                )
+
+        self.preprocessing_options = options
+        return options
+
+    def prepare_data(self, df: pd.DataFrame, target_col: str, model_type: str) -> Dict:
+        """Prepare data according to selected preprocessing options."""
         try:
-            features = pd.DataFrame(index=df.index)
+            # Initial validation checks
+            if len(df) < self.preprocessing_options['min_data_points']:
+                st.error(f"Insufficient data points. Minimum required: {self.preprocessing_options['min_data_points']}")
+                return None
 
-            # Add lag features
-            if lags is None:
-                lags = [1, 7, 14, 30]  # Default lags
+            missing_pct = df[target_col].isnull().mean() * 100
+            if missing_pct > self.preprocessing_options['max_missing_pct']:
+                st.error(
+                    f"Too many missing values ({missing_pct:.1f}%). Maximum allowed: {self.preprocessing_options['max_missing_pct']}%")
+                return None
 
-            for lag in lags:
-                features[f'lag_{lag}'] = df[target_col].shift(lag)
+            # Make a copy to avoid modifying original data
+            processed_df = df.copy()
 
-            # Add date features if requested
-            if add_date_features and isinstance(df.index, (pd.DatetimeIndex, pd.PeriodIndex)):
-                features['year'] = df.index.year
-                features['month'] = df.index.month
-                features['day'] = df.index.day
-                features['day_of_week'] = df.index.dayofweek
-                features['quarter'] = df.index.quarter
+            # Handle missing values first if selected
+            if self.preprocessing_options['handle_missing'] != 'None':
+                processed_df = self._handle_missing_values(processed_df, target_col)
+                if processed_df is None:
+                    return None
 
-            # Add rolling statistics
-            for window in [7, 14, 30]:
-                features[f'rolling_mean_{window}'] = df[target_col].rolling(window=window).mean()
-                features[f'rolling_std_{window}'] = df[target_col].rolling(window=window).std()
+            # Handle outliers if selected
+            if self.preprocessing_options.get('handle_outliers', False):
+                processed_df = self._handle_outliers(
+                    processed_df,
+                    target_col,
+                    method=self.preprocessing_options['outlier_method']
+                )
+                if processed_df is None:
+                    return None
 
-            # Add target column
-            features[target_col] = df[target_col]
+            # Apply transformation if selected
+            if self.preprocessing_options['transform_method'] != 'None':
+                processed_df = self._transform_data(
+                    processed_df,
+                    target_col,
+                    method=self.preprocessing_options['transform_method']
+                )
+                if processed_df is None:
+                    return None
 
-            return features.dropna()
 
-        except Exception as e:
-            st.error(f"Error creating features: {str(e)}")
-            return None
+            # Scale data if selected
+            if self.preprocessing_options['scaling_method'] != 'None':
+                processed_df = self._scale_data(processed_df, target_col,
+                                                self.preprocessing_options['scaling_method'])
 
-    def prepare_data(self, series):
-        """
-        Prepare the raw data with normalization and scaling.
-        """
-        try:
-            # Debug logging
-            st.write("Debug: Initial series type:", type(series))
-            st.write("Debug: Initial series dtype:", series.dtype)
-            st.write("Debug: First few values:", series.head())
+            # Add features if selected
+            if self.preprocessing_options['add_date_features']:
+                processed_df = self._add_date_features(processed_df)
 
-            # Ensure we're working with numeric data
-            if not pd.api.types.is_numeric_dtype(series):
-                st.error("Target variable must be numeric")
-                return None, None
+            if self.preprocessing_options.get('create_lags', False):
+                processed_df = self._create_lag_features(
+                    processed_df, target_col,
+                    self.preprocessing_options['max_lags']
+                )
 
-            # Convert to numpy array
-            data = series.values
+            if self.preprocessing_options.get('add_rolling_features', False):
+                processed_df = self._add_rolling_features(processed_df, target_col)
 
-            # Ensure data is 2D
-            if len(data.shape) == 1:
-                data = data.reshape(-1, 1)
-                st.write("Debug: Reshaped data shape:", data.shape)
+            # Split size calculations
+            train_size = int(len(processed_df) * self.preprocessing_options['train_size'])
 
-            # Handle inf and nan values
-            data = np.nan_to_num(data, nan=np.nanmean(data), posinf=None, neginf=None)
-            st.write("Debug: Data shape before scaling:", data.shape)
-            st.write("Debug: Data min/max:", np.min(data), np.max(data))
+            if self.preprocessing_options['validation_split']:
+                val_size = int(train_size * self.preprocessing_options['val_size'])
+                train_size = train_size - val_size
+            else:
+                val_size = 0
 
-            # Standardize the data
-            try:
-                scaled_data = self.scaler.fit_transform(data)
-                st.write("Debug: Scaling successful")
-                st.write("Debug: Scaled data shape:", scaled_data.shape)
-                return scaled_data, self.scaler
-            except Exception as e:
-                st.error(f"Error during scaling: {str(e)}")
-                return None, None
+            # Create splits based on model type
+            if model_type in ['ARIMA', 'SARIMA']:
+                splits = {
+                    'train': processed_df[target_col][:train_size],
+                    'test': processed_df[target_col][train_size + val_size:],
+                    'test_target': processed_df[target_col][train_size + val_size:],
+                    'test_index': processed_df.index[train_size + val_size:]
+                }
+                if val_size > 0:
+                    splits['val'] = processed_df[target_col][train_size:train_size + val_size]
+            else:
+                # For ML/DL models
+                feature_cols = [col for col in processed_df.columns if col != target_col]
+                splits = {
+                    'train': (processed_df[feature_cols][:train_size],
+                              processed_df[target_col][:train_size]),
+                    'test': (processed_df[feature_cols][train_size + val_size:],
+                             processed_df[target_col][train_size + val_size:]),
+                    'test_target': processed_df[target_col][train_size + val_size:],
+                    'test_index': processed_df.index[train_size + val_size:]
+                }
+                if val_size > 0:
+                    splits['val'] = (processed_df[feature_cols][train_size:train_size + val_size],
+                                     processed_df[target_col][train_size:train_size + val_size])
+
+            return splits
 
         except Exception as e:
             st.error(f"Error in data preparation: {str(e)}")
-            st.write("Debug: Full error:", str(e))
-            return None, None
+            return None
 
-    def prepare_ml_data(self, features, target_col, test_size=0.2):
-        """Prepare data for ML models."""
+    def _handle_missing_values(self, df: pd.DataFrame, target_col: str) -> pd.DataFrame:
+        """Handle missing values using specified method."""
+        method = self.preprocessing_options['handle_missing']
+
+        if method == 'Forward Fill':
+            df[target_col] = df[target_col].ffill()
+        elif method == 'Backward Fill':
+            df[target_col] = df[target_col].bfill()
+        elif method == 'Linear Interpolation':
+            df[target_col] = df[target_col].interpolate()
+        elif method == 'Mean':
+            df[target_col] = df[target_col].fillna(df[target_col].mean())
+
+        return df
+
+    def _scale_data(self, df: pd.DataFrame, target_col: str, method: str) -> pd.DataFrame:
+        """Scale data using specified method."""
+        if method == 'StandardScaler':
+            self.scaler = StandardScaler()
+        elif method == 'MinMaxScaler':
+            self.scaler = MinMaxScaler()
+        elif method == 'RobustScaler':
+            self.scaler = RobustScaler()
+
+        df[target_col] = self.scaler.fit_transform(df[target_col].values.reshape(-1, 1))
+        return df
+
+    # Add this method to the TimeSeriesPreprocessor class in preprocessor.py
+
+    def prepare_sequences(self, data: pd.Series, sequence_length: int, n_features: int = 1,
+                          train_size: float = 0.8) -> Dict:
+        """Prepare sequences for RNN/LSTM models.
+
+        Args:
+            data: Pandas Series containing the target variable
+            sequence_length: Length of input sequences
+            n_features: Number of features (1 for univariate)
+            train_size: Proportion of data for training
+
+        Returns:
+            Dict containing train/val/test splits as numpy arrays
+        """
         try:
-            # Split features and target
-            y = features[target_col]
-            X = features.drop(columns=[target_col])
+            # Convert data to numpy array if needed
+            values = data.values if isinstance(data, pd.Series) else data
+            values = values.reshape(-1, 1) if n_features == 1 else values
 
-            # Split into train and test
-            split_idx = int(len(features) * (1 - test_size))
+            # Create sequences
+            sequences = []
+            targets = []
 
-            X_train = X[:split_idx]
-            X_test = X[split_idx:]
-            y_train = y[:split_idx]
-            y_test = y[split_idx:]
+            for i in range(len(values) - sequence_length):
+                sequences.append(values[i:(i + sequence_length)])
+                targets.append(values[i + sequence_length])
 
-            return (X_train, y_train), (X_test, y_test)
+            # Convert to numpy arrays
+            X = np.array(sequences)
+            y = np.array(targets)
+
+            # Reshape if needed
+            if n_features == 1:
+                X = X.reshape((X.shape[0], X.shape[1], 1))
+                y = y.reshape(-1)
+
+            # Calculate split sizes
+            train_idx = int(len(X) * train_size)
+            val_idx = train_idx
+            if self.preprocessing_options.get('validation_split', True):
+                val_size = self.preprocessing_options.get('val_size', 0.2)
+                val_idx = train_idx - int(train_idx * val_size)
+
+            # Create splits
+            splits = {
+                'train': (X[:val_idx], y[:val_idx])
+            }
+
+            if self.preprocessing_options.get('validation_split', True):
+                splits['val'] = (X[val_idx:train_idx], y[val_idx:train_idx])
+
+            splits.update({
+                'test': (X[train_idx:], y[train_idx:]),
+                'test_target': pd.Series(y[train_idx:], index=data.index[train_idx + sequence_length:]),
+                'test_index': data.index[train_idx + sequence_length:]
+            })
+
+            return splits
 
         except Exception as e:
-            st.error(f"Error preparing ML data: {str(e)}")
+            st.error(f"Error preparing sequences: {str(e)}")
             return None
+
+    def _prepare_standard_split(self, df: pd.DataFrame, target_col: str) -> Dict:
+        """Prepare train/val/test split for traditional models."""
+        train_size = int(len(df) * self.preprocessing_options['train_size'])
+
+        if self.preprocessing_options['validation_split']:
+            val_size = int(train_size * self.preprocessing_options['val_size'])
+            train_size = train_size - val_size
+
+            return {
+                'train': df[target_col][:train_size],
+                'val': df[target_col][train_size:train_size + val_size],
+                'test': df[target_col][train_size + val_size:],
+                'scaler': self.scaler
+            }
+        else:
+            return {
+                'train': df[target_col][:train_size],
+                'test': df[target_col][train_size:],
+                'scaler': self.scaler
+            }
+
+    def _add_date_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add date-based features if index is datetime."""
+        if isinstance(df.index, pd.DatetimeIndex):
+            df['year'] = df.index.year
+            df['month'] = df.index.month
+            df['day'] = df.index.day
+            df['dayofweek'] = df.index.dayofweek
+            df['quarter'] = df.index.quarter
+        return df
+
+    def _create_lag_features(self, df: pd.DataFrame, target_col: str, max_lags: int) -> pd.DataFrame:
+        """Create lagged versions of target variable."""
+        for lag in range(1, max_lags + 1):
+            df[f'lag_{lag}'] = df[target_col].shift(lag)
+        return df.dropna()
+
+    def _add_rolling_features(self, df: pd.DataFrame, target_col: str) -> pd.DataFrame:
+        """Add rolling mean and standard deviation features."""
+        for window in [7, 14, 30]:
+            df[f'rolling_mean_{window}'] = df[target_col].rolling(window=window).mean()
+            df[f'rolling_std_{window}'] = df[target_col].rolling(window=window).std()
+        return df.dropna()
 
     def calculate_prediction_intervals(self, model, X, confidence=0.95, n_iterations=100):
         """Calculate prediction intervals using bootstrap."""
         try:
             predictions = []
+            is_sequence = len(X.shape) == 3  # Check if input is sequential data
 
             for _ in range(n_iterations):
                 # Bootstrap the data
-                indices = np.random.choice(len(X), size=len(X), replace=True)
-                X_bootstrap = X[indices]
+                if is_sequence:
+                    indices = np.random.choice(len(X), size=len(X), replace=True)
+                    X_bootstrap = X[indices]
+                else:
+                    if isinstance(X, pd.DataFrame):
+                        X_bootstrap = X.sample(n=len(X), replace=True)
+                    else:
+                        indices = np.random.choice(len(X), size=len(X), replace=True)
+                        X_bootstrap = X[indices]
 
                 # Generate predictions
-                if hasattr(model, 'predict'):
-                    pred = model.predict(X_bootstrap)
-                else:
-                    pred = model(X_bootstrap)
-
+                pred = model.predict(X_bootstrap)
+                if hasattr(self, 'scaler') and self.scaler is not None:
+                    pred = self.scaler.inverse_transform(pred.reshape(-1, 1)).flatten()
                 predictions.append(pred)
 
             # Calculate intervals
@@ -160,202 +452,4 @@ class TimeSeriesPreprocessor:
             st.error(f"Error creating CV splits: {str(e)}")
             return None
 
-    def prepare_multivariate_data(self, df, target_cols, sequence_length, batch_size):
-        """Prepare data for multivariate time series."""
-        try:
-            # Scale data
-            scaled_data = self.scaler.fit_transform(df[target_cols])
 
-            # Create sequences
-            X, y = [], []
-            for i in range(len(scaled_data) - sequence_length):
-                X.append(scaled_data[i:(i + sequence_length)])
-                y.append(scaled_data[i + sequence_length])
-
-            X = np.array(X)
-            y = np.array(y)
-
-            # Create TF datasets
-            dataset = tf.data.Dataset.from_tensor_slices((X, y))
-            dataset = dataset.shuffle(1000).batch(batch_size)
-
-            return dataset, self.scaler
-
-        except Exception as e:
-            st.error(f"Error preparing multivariate data: {str(e)}")
-            return None, None
-
-    def create_sequences(self, scaled_data, sequence_length, batch_size, val_split=0.2, test_split=0.2):
-        """Create TensorFlow datasets with proper sizing based on sequences_count"""
-        try:
-            st.write("Debug: Starting create_sequences")
-            st.write("Debug: scaled_data shape:", scaled_data.shape)
-            st.write("Debug: sequence_length:", sequence_length)
-            st.write("Debug: batch_size:", batch_size)
-
-            n = len(scaled_data)
-            sequences_count = n - sequence_length
-
-            # Ensure enough data points
-            if sequences_count < 3:
-                st.error(f"Not enough sequences for the given sequence length ({sequence_length}). Minimum required is 3 sequences, but got {sequences_count}.")
-                return None, None, None
-
-            # Calculate the effective sizes based on sequences_count
-            train_size = int(sequences_count * (1 - val_split - test_split))
-            val_size = int(sequences_count * val_split)
-            test_size = sequences_count - train_size - val_size
-
-            # Adjust proportions if any split is too small
-            min_split_size = 1  # At least one sequence per split
-            if train_size < min_split_size or val_size < min_split_size or test_size < min_split_size:
-                st.warning("Adjusting dataset splits to ensure all splits have at least one sample.")
-                train_size = max(min_split_size, int(sequences_count * 0.7))
-                val_size = max(min_split_size, int(sequences_count * 0.15))
-                test_size = sequences_count - train_size - val_size
-
-            # Prepare sequences and targets
-            sequences = []
-            targets = []
-            for i in range(sequences_count):
-                sequences.append(scaled_data[i:(i + sequence_length)])
-                targets.append(scaled_data[i + sequence_length])
-
-            sequences = np.array(sequences)
-            targets = np.array(targets)
-
-            # Split the sequences and targets
-            train_sequences = sequences[:train_size]
-            train_targets = targets[:train_size]
-
-            val_sequences = sequences[train_size:train_size + val_size]
-            val_targets = targets[train_size:train_size + val_size]
-
-            test_sequences = sequences[train_size + val_size:]
-            test_targets = targets[train_size + val_size:]
-
-            # Handle cases where any dataset split is empty
-            if len(train_sequences) == 0 or len(val_sequences) == 0 or len(test_sequences) == 0:
-                st.error("One of the datasets (train, val, or test) is empty. Adjust the sequence length or split ratios.")
-                return None, None, None
-
-            # Adjust batch size based on train_size
-            adjusted_batch_size = max(1, min(batch_size, train_size // 10))
-
-            # Create TensorFlow datasets
-            train_dataset = tf.data.Dataset.from_tensor_slices((train_sequences, train_targets)).shuffle(1024).batch(adjusted_batch_size)
-            val_dataset = tf.data.Dataset.from_tensor_slices((val_sequences, val_targets)).batch(adjusted_batch_size)
-            test_dataset = tf.data.Dataset.from_tensor_slices((test_sequences, test_targets)).batch(adjusted_batch_size)
-
-            return train_dataset, val_dataset, test_dataset
-
-        except Exception as e:
-            st.error(f"Error creating datasets: {str(e)}")
-            return None, None, None
-
-    def create_tf_datasets(self, sequences, targets, batch_size, val_split=0.2, test_split=0.2):
-        """
-        Create TensorFlow datasets for training, validation, and testing.
-
-        Args:
-            sequences (np.array): Sequence data
-            targets (np.array): Target values
-            batch_size (int): Batch size
-            val_split (float): Validation split ratio
-            test_split (float): Test split ratio
-
-        Returns:
-            tuple: (train_dataset, val_dataset, test_dataset) or (None, None, None) if error
-        """
-        try:
-            # Calculate split indices
-            n = len(sequences)
-            train_size = int(n * (1 - val_split - test_split))
-            val_size = int(n * val_split)
-
-            # Split data
-            train_sequences = sequences[:train_size]
-            train_targets = targets[:train_size]
-
-            val_sequences = sequences[train_size:train_size + val_size]
-            val_targets = targets[train_size:train_size + val_size]
-
-            test_sequences = sequences[train_size + val_size:]
-            test_targets = targets[train_size + val_size:]
-
-            # Create TF datasets
-            train_dataset = tf.data.Dataset.from_tensor_slices(
-                (train_sequences, train_targets)).shuffle(1024).batch(batch_size)
-            val_dataset = tf.data.Dataset.from_tensor_slices(
-                (val_sequences, val_targets)).batch(batch_size)
-            test_dataset = tf.data.Dataset.from_tensor_slices(
-                (test_sequences, test_targets)).batch(batch_size)
-
-            return train_dataset, val_dataset, test_dataset
-
-        except Exception as e:
-            st.error(f"Error creating TF datasets: {str(e)}")
-            return None, None, None
-
-    def prepare_dl_datasets(self, series, sequence_length, batch_size, val_split=0.2, test_split=0.2):
-        """Main function to prepare data for deep learning with validation"""
-        try:
-            # Convert index to datetime if not already
-            if not isinstance(series.index, pd.DatetimeIndex):
-                try:
-                    series.index = pd.to_datetime(series.index)
-                except Exception as e:
-                    st.warning(f"Could not convert index to datetime: {str(e)}")
-
-            # Check for NaN values
-            if series.isna().any():
-                st.error("Data contains missing values. Please clean the data first.")
-                return None, None, None, None
-
-            # Check if series is too short
-            if len(series) < sequence_length + 3:  # At least 3 sequences
-                st.error(f"Time series too short. Need at least {sequence_length + 3} points.")
-                return None, None, None, None
-
-            # Create progress containers
-            prep_status = st.empty()
-            prep_progress = st.progress(0)
-
-            # Data preparation steps
-            prep_status.text("Preparing data...")
-            prep_progress.progress(0.2)
-
-            scaled_data, scaler = self.prepare_data(series)
-            if scaled_data is None:
-                prep_progress.empty()
-                prep_status.empty()
-                return None, None, None, None
-            prep_progress.progress(0.6)
-
-            prep_status.text("Creating datasets...")
-            train_dataset, val_dataset, test_dataset = self.create_sequences(
-                scaled_data=scaled_data,
-                sequence_length=sequence_length,
-                batch_size=batch_size,
-                val_split=val_split,
-                test_split=test_split
-            )
-
-            if train_dataset is None:
-                st.error("Failed to create datasets. Please adjust the parameters.")
-                prep_progress.empty()
-                prep_status.empty()
-                return None, None, None, None
-
-            prep_progress.progress(1.0)
-            prep_status.text("Data preparation complete!")
-
-            # Clean up progress indicators
-            prep_status.empty()
-            prep_progress.empty()
-
-            return train_dataset, val_dataset, test_dataset, scaler
-
-        except Exception as e:
-            st.error(f"Error in data preparation: {str(e)}")
-            return None, None, None, None

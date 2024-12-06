@@ -41,11 +41,10 @@ class DataLoader:
         except Exception as e:
             return False, f"Validation error: {str(e)}"
 
-    @staticmethod
-    def fix_dtypes(df: pd.DataFrame) -> pd.DataFrame:
+    def fix_dtypes(self, df: pd.DataFrame) -> pd.DataFrame:
         """Fix data types and handle missing values for Arrow compatibility."""
         try:
-            # Convert index to datetime if it's not already
+            # Ensure datetime index if it's not already
             if not isinstance(df.index, pd.DatetimeIndex):
                 try:
                     df.index = pd.to_datetime(df.index)
@@ -62,7 +61,7 @@ class DataLoader:
                     continue
                 except:
                     pass
-                
+
                 # Try to convert to datetime
                 try:
                     df[col] = pd.to_datetime(df[col], errors='coerce')
@@ -71,24 +70,25 @@ class DataLoader:
                     continue
                 except:
                     pass
-                
+
                 # If neither numeric nor datetime, convert to string and fill NaN
                 df[col] = df[col].fillna('Unknown').astype(str)
 
             return df
+
         except Exception as e:
             st.error(f"Error fixing data types: {str(e)}")
             return df
 
     @classmethod
     def load_data(cls,
-             source_type: str, 
-             uploaded_file: Optional[str] = None,
-             github_url: Optional[str] = None,
-             selected_file: Optional[str] = None,
-             ticker: Optional[str] = None,
-             start_date: Optional[str] = None,
-             end_date: Optional[str] = None) -> Optional[pd.DataFrame]:
+                  source_type: str,
+                  uploaded_file: Optional[str] = None,
+                  github_url: Optional[str] = None,
+                  selected_file: Optional[str] = None,
+                  ticker: Optional[str] = None,
+                  start_date: Optional[str] = None,
+                  end_date: Optional[str] = None) -> Optional[pd.DataFrame]:
         """
         Load data from various sources with comprehensive error handling.
         """
@@ -98,17 +98,19 @@ class DataLoader:
             df = None
 
             # Define parser for date columns
-            date_parser = lambda x: pd.to_datetime(x, format='%m/%d/%Y', errors='coerce')
+            date_parser = lambda x: pd.to_datetime(x, errors='coerce')
 
             if source_type == "upload" and uploaded_file is not None:
-                df = pd.read_csv(uploaded_file, 
-                            parse_dates=['Date'],
-                            date_parser=date_parser)
+                df = pd.read_csv(uploaded_file,
+                                 parse_dates=True,
+                                 index_col=0)
+                df.index = pd.to_datetime(df.index)
 
             elif source_type == "github" and github_url and selected_file:
                 df = pd.read_csv(selected_file,
-                            parse_dates=['Date'],
-                            date_parser=date_parser)
+                                 parse_dates=True,
+                                 index_col=0)
+                df.index = pd.to_datetime(df.index)
 
             elif source_type == "yfinance" and ticker:
                 df = yf.download(ticker, start=start_date, end=end_date)
@@ -121,15 +123,21 @@ class DataLoader:
             for col in numeric_columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
 
-            # Set Date as index if it exists
-            if 'Date' in df.columns:
-                df.set_index('Date', inplace=True)
-                
+            # Ensure index is datetime
+            if not isinstance(df.index, pd.DatetimeIndex):
+                try:
+                    df.index = pd.to_datetime(df.index)
+                except:
+                    st.warning("Could not convert index to datetime. Using default index.")
+                    df.index = pd.RangeIndex(start=0, stop=len(df))
+
             # Sort index
             df.sort_index(inplace=True)
 
+            # Create instance to call instance method
+            loader = cls()
             # Fix data types
-            df = cls.fix_dtypes(df)
+            df = loader.fix_dtypes(df)
 
             # Display data info for debugging
             st.write("Debug: DataFrame info after loading:")
@@ -179,31 +187,103 @@ class DataLoader:
         try:
             if example_file is None:
                 example_file = DEFAULT_EXAMPLE_FILE
-                
+
             # Construct raw GitHub URL
             file_url = f"{GITHUB_RAW_BASE_URL}/{example_file}"
-            
+
             # Load the data
-            df = pd.read_csv(file_url)
-            
-            # Try to parse date column if it exists
-            date_cols = df.select_dtypes(include=['object']).columns
-            for col in date_cols:
-                try:
-                    df[col] = pd.to_datetime(df[col])
-                except:
-                    continue
-                    
-            # Set date column as index if found
-            date_cols = df.select_dtypes(include=['datetime64']).columns
-            if len(date_cols) > 0:
-                df.set_index(date_cols[0], inplace=True)
-                st.info(f"Set {date_cols[0]} as the time series index.")
+            df = pd.read_csv(file_url, parse_dates=True, index_col=0)
+
+            # Ensure datetime index
+            df.index = pd.to_datetime(df.index)
+
+            # Sort index
+            df.sort_index(inplace=True)
+
+            # Fix data types
+            df = self.fix_dtypes(df)
 
             return df
 
         except Exception as e:
             st.error(f"Error loading example data: {str(e)}")
+            return None
+
+    def prepare_data_for_model(self, df: pd.DataFrame, target_col: str, model_type: str) -> Optional[Dict]:
+        """
+        Prepare data for model training based on model type.
+
+        Args:
+            df: Input dataframe
+            target_col: Target column name
+            model_type: Type of model ('ARIMA', 'SARIMA', 'Random Forest', etc)
+
+        Returns:
+            Dict containing prepared data splits or None if error
+        """
+        try:
+            # Validate input data
+            if target_col not in df.columns:
+                raise ValueError(f"Target column {target_col} not found in data")
+
+            # Ensure datetime index
+            if not isinstance(df.index, pd.DatetimeIndex):
+                try:
+                    df.index = pd.to_datetime(df.index)
+                except:
+                    st.warning("Could not convert index to datetime. Using numeric index.")
+                    df.index = pd.RangeIndex(start=0, stop=len(df))
+
+            # Split data into train/test
+            train_size = int(len(df) * 0.8)
+            train_df = df[:train_size]
+            test_df = df[train_size:]
+
+            if model_type in ['ARIMA', 'SARIMA']:
+                # For traditional models, return just the target series
+                return {
+                    'train': train_df[target_col],
+                    'test': test_df[target_col],
+                    'test_target': test_df[target_col],
+                    'test_index': test_df.index
+                }
+            else:
+                # For ML/DL models, create lagged features
+                features = []
+                lags = [1, 7, 14, 30]  # Example lag values
+
+                for lag in lags:
+                    df[f'lag_{lag}'] = df[target_col].shift(lag)
+
+                # Add basic date features if index is datetime
+                if isinstance(df.index, pd.DatetimeIndex):
+                    df['month'] = df.index.month
+                    df['day'] = df.index.day
+                    df['day_of_week'] = df.index.dayofweek
+
+                # Drop rows with NaN values from feature creation
+                df = df.dropna()
+
+                # Split features and target
+                X = df.drop(columns=[target_col])
+                y = df[target_col]
+
+                # Re-split after feature creation
+                train_size = int(len(df) * 0.8)
+                X_train = X[:train_size]
+                X_test = X[train_size:]
+                y_train = y[:train_size]
+                y_test = y[train_size:]
+
+                return {
+                    'train': (X_train, y_train),
+                    'test': (X_test, y_test),
+                    'test_target': y_test,
+                    'test_index': y_test.index
+                }
+
+        except Exception as e:
+            st.error(f"Error preparing data: {str(e)}")
             return None
 
     @staticmethod

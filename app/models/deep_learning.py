@@ -5,7 +5,7 @@ from tensorflow import keras
 from tensorflow.keras import layers
 from .base import TimeSeriesModel
 import streamlit as st
-
+import numpy as np
 
 class DeepLearningModel(TimeSeriesModel):
     """Base class for deep learning models."""
@@ -15,6 +15,10 @@ class DeepLearningModel(TimeSeriesModel):
         self.sequence_length = sequence_length
         self.n_features = n_features
 
+    def build(self, **kwargs):
+        """Base build method - should be overridden by subclasses."""
+        raise NotImplementedError
+
     def save(self, path):
         """Save the Keras model."""
         self.model.save(path)
@@ -23,11 +27,19 @@ class DeepLearningModel(TimeSeriesModel):
         """Load the Keras model."""
         self.model = keras.models.load_model(path)
 
-    def train(self, train_data, val_data=None, epochs=10, callbacks=None):
-        """Train the model."""
+    def train(self, train_data, val_data=None):
+        """Train the model using parameters from train_params."""
+        if not hasattr(self, 'train_params'):
+            self.train_params = {}
+
+        batch_size = self.train_params.get('batch_size', 32)
+        epochs = self.train_params.get('epochs', 50)
+        callbacks = self.train_params.get('callbacks', None)
+
         return self.model.fit(
             train_data,
             epochs=epochs,
+            batch_size=batch_size,
             validation_data=val_data,
             callbacks=callbacks
         )
@@ -37,100 +49,183 @@ class DeepLearningModel(TimeSeriesModel):
         return self.model.evaluate(test_data)
 
 
-class SimpleRNNModel(DeepLearningModel):
+class SequentialModel(DeepLearningModel):
+    """Sequential model with configurable layers."""
+
+    def build(self, **kwargs):
+        """Build Sequential model with configured layers."""
+        try:
+            inputs = keras.Input(shape=(self.sequence_length, self.n_features))
+            x = inputs
+
+            # Extract layer parameters from kwargs
+            layer_params = {}
+            for key in list(kwargs.keys()):
+                if key.startswith('layer_'):
+                    layer_params[key] = kwargs.pop(key)
+
+            # Sort layers by their index
+            sorted_layers = sorted(layer_params.items(), key=lambda x: int(x[0].split('_')[1]))
+
+            # Process each layer
+            for idx, (_, layer_config) in enumerate(sorted_layers):
+                layer_type = layer_config['type'].lower()
+                units = layer_config['units']
+                activation = layer_config['activation']
+                dropout = layer_config['dropout']
+
+                # Add the appropriate layer type
+                if layer_type == 'dense':
+                    x = layers.Dense(units, activation=activation)(x)
+                elif layer_type == 'lstm':
+                    return_sequences = idx < len(sorted_layers) - 1  # True if not last layer
+                    x = layers.LSTM(units, activation=activation,
+                                  return_sequences=return_sequences)(x)
+                elif layer_type == 'gru':
+                    return_sequences = idx < len(sorted_layers) - 1  # True if not last layer
+                    x = layers.GRU(units, activation=activation,
+                                 return_sequences=return_sequences)(x)
+                elif layer_type == 'simple_rnn':
+                    return_sequences = idx < len(sorted_layers) - 1  # True if not last layer
+                    x = layers.SimpleRNN(units, activation=activation,
+                                       return_sequences=return_sequences)(x)
+
+                # Add dropout if specified
+                if dropout > 0:
+                    x = layers.Dropout(dropout)(x)
+
+            # Add final dense layer for prediction
+            outputs = layers.Dense(1)(x)
+            self.model = keras.Model(inputs, outputs)
+
+            # Configure optimizer
+            optimizer = kwargs.get('optimizer', 'adam')
+            if isinstance(optimizer, str):
+                learning_rate = kwargs.get('learning_rate', 0.001)
+                optimizer = keras.optimizers.get(optimizer)
+                optimizer.learning_rate = learning_rate
+
+            # Compile model
+            self.model.compile(
+                optimizer=optimizer,
+                loss='mse',
+                metrics=['mae']
+            )
+
+            st.write(f"Model input shape: {inputs.shape}")  # Debug info
+            return self.model
+
+        except Exception as e:
+            st.error(f"Error building Sequential model: {str(e)}")
+            st.write("Debug info:")
+            st.write(f"Sequence length: {self.sequence_length}")
+            st.write(f"Features: {self.n_features}")
+            st.write(f"Layer params: {layer_params}")
+            return None
+
+
+class SimpleRNNModel(SequentialModel):
     """Simple RNN model implementation."""
 
-    def build(self, units=64, dropout_rate=0.1):
-        """Build Simple RNN model."""
-        inputs = keras.Input(shape=(self.sequence_length, self.n_features))
-        x = layers.SimpleRNN(units, dropout=dropout_rate)(inputs)
-        outputs = layers.Dense(1)(x)
-        self.model = keras.Model(inputs, outputs)
-        return self.model
-
-
-class LSTMModel(DeepLearningModel):
-    """LSTM model implementation."""
-
-    def build(self, units=64, dropout_rate=0.1):
-        """Build LSTM model."""
-        inputs = keras.Input(shape=(self.sequence_length, self.n_features))
-        x = layers.LSTM(units, dropout=dropout_rate)(inputs)
-        outputs = layers.Dense(1)(x)
-        self.model = keras.Model(inputs, outputs)
-        return self.model
-
-
-class StackedModel(DeepLearningModel):
-    """Stacked LSTM+RNN model implementation."""
-
-    def build(self, lstm_units=128, rnn_units=64, dropout_rate=0.1):
-        """Build stacked LSTM+RNN model."""
-        inputs = keras.Input(shape=(self.sequence_length, self.n_features))
-        x = layers.LSTM(lstm_units, dropout=dropout_rate, return_sequences=True)(inputs)
-        x = layers.SimpleRNN(rnn_units, dropout=dropout_rate)(x)
-        x = layers.Dropout(dropout_rate)(x)
-        outputs = layers.Dense(1)(x)
-        self.model = keras.Model(inputs, outputs)
-        return self.model
-
-
-class SequentialModel(DeepLearningModel):
-    """Sequential model implementation with customizable layers."""
-
-    def __init__(self, name="Sequential", sequence_length=10, n_features=1):
-        super().__init__(name, sequence_length, n_features)
-        self.layers_config = []
-
-    def add_layer(self, layer_type, units, activation='relu', dropout=0.0):
-        """Add a layer to the model configuration."""
-        self.layers_config.append({
-            'type': layer_type,
-            'units': units,
-            'activation': activation,
-            'dropout': dropout
-        })
-
-    def build(self, learning_rate=0.001):
-        """Build Sequential model with configured layers."""
-        inputs = keras.Input(shape=(self.sequence_length, self.n_features))
-        x = inputs
-
-        for layer_config in self.layers_config:
-            if layer_config['type'].lower() == 'dense':
-                x = layers.Dense(
-                    layer_config['units'],
-                    activation=layer_config['activation']
-                )(x)
-            elif layer_config['type'].lower() == 'lstm':
-                x = layers.LSTM(
-                    layer_config['units'],
-                    activation=layer_config['activation'],
-                    return_sequences=True
-                )(x)
-            elif layer_config['type'].lower() == 'gru':
-                x = layers.GRU(
-                    layer_config['units'],
-                    activation=layer_config['activation'],
-                    return_sequences=True
-                )(x)
-
-            if layer_config['dropout'] > 0:
-                x = layers.Dropout(layer_config['dropout'])(x)
-
-        # Add final dense layer for prediction
-        outputs = layers.Dense(1)(x)
-
-        self.model = keras.Model(inputs, outputs)
-        optimizer = keras.optimizers.Adam(learning_rate=learning_rate)
-        self.model.compile(
-            optimizer=optimizer,
-            loss='mse',
-            metrics=['mae']
+    def build(self, units=64, dropout_rate=0.1, **kwargs):
+        """Build Simple RNN model using sequential build method."""
+        return super().build(
+            layer_0={
+                'type': 'simple_rnn',
+                'units': units,
+                'activation': 'tanh',
+                'dropout': dropout_rate
+            },
+            **kwargs
         )
 
-        return self.model
+
+class LSTMModel(SequentialModel):
+    """LSTM model implementation."""
+
+    def build(self, units=64, dropout_rate=0.1, **kwargs):
+        """Build LSTM model using sequential build method."""
+        return super().build(
+            layer_0={
+                'type': 'lstm',
+                'units': units,
+                'activation': 'tanh',
+                'dropout': dropout_rate
+            },
+            **kwargs
+        )
+
+
+class StackedModel(SequentialModel):
+    """Stacked LSTM+RNN model implementation."""
+
+    def build(self, lstm_units=128, rnn_units=64, dropout_rate=0.1, **kwargs):
+        """Build stacked model using sequential build method."""
+        return super().build(
+            layer_0={
+                'type': 'lstm',
+                'units': lstm_units,
+                'activation': 'tanh',
+                'dropout': dropout_rate
+            },
+            layer_1={
+                'type': 'simple_rnn',
+                'units': rnn_units,
+                'activation': 'tanh',
+                'dropout': dropout_rate
+            },
+            **kwargs
+        )
+
+    def predict(self, X):
+        """Generate predictions."""
+        try:
+            predictions = self.model.predict(X)
+            return predictions.squeeze()
+        except Exception as e:
+            st.error(f"Error in prediction: {str(e)}")
+            return None
+
+    def evaluate(self, test_data):
+        """Evaluate model on test data."""
+        try:
+            if isinstance(test_data, tuple):
+                X_test, y_test = test_data
+            else:
+                X_test, y_test = test_data.data, test_data.targets
+
+            predictions = self.predict(X_test)
+
+            # Calculate metrics
+            mae = tf.keras.metrics.mean_absolute_error(y_test, predictions)
+            mse = tf.keras.metrics.mean_squared_error(y_test, predictions)
+            rmse = tf.math.sqrt(mse)
+
+            return {
+                'MAE': float(mae),
+                'RMSE': float(rmse),
+                'MSE': float(mse)
+            }
+        except Exception as e:
+            st.error(f"Error in evaluation: {str(e)}")
+            return None
 
     def summary(self):
         """Print model summary."""
-        return self.model.summary()
+        if self.model is not None:
+            return self.model.summary()
+        return "Model not built yet."
+
+
+def create_deep_learning_model(model_type: str, sequence_length: int, n_features: int = 1, **kwargs):
+    """Factory function to create deep learning models."""
+    if model_type == 'Simple RNN':
+        return SimpleRNNModel(name='Simple RNN', sequence_length=sequence_length, n_features=n_features)
+    elif model_type == 'LSTM':
+        return LSTMModel(name='LSTM', sequence_length=sequence_length, n_features=n_features)
+    elif model_type == 'Stacked LSTM+RNN':
+        return StackedModel(name='Stacked LSTM+RNN', sequence_length=sequence_length, n_features=n_features)
+    elif model_type == 'Sequential':
+        return SequentialModel(name='Sequential', sequence_length=sequence_length, n_features=n_features)
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
