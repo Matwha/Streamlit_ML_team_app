@@ -216,94 +216,12 @@ def generate_prediction_intervals(
             )[1:]
 
             # Create results DataFrame
+            # Create results DataFrame
             results = pd.DataFrame({
-                "actual": y_test,
-                'prediction': predictions,
-                'lower_bound': lower_bounds,
-                'upper_bound': upper_bounds
-            }, index=future_index)
-        pass
+                "actual": y_test,  # True values for comparison
+                "prediction": predictions,  # Predicted values from the model
+                "lower_bound": lower_bounds,  # Lower bound of the confidence interval
+                "upper_bound": upper_bounds,  # Upper bound of the confidence interval
+                }, index=future_index)
 
     return results
-
-with st.sidebar:
-    st.subheader("Confidence Interval Settings")
-    method = st.selectbox("Confidence Interval Method", ["bootstrapping", "quantile", "conformal"])
-    prediction_type = st.radio("Prediction Type", ["one-step", "multi-step"])
-    alpha = st.slider("Significance Level (alpha)", min_value=0.01, max_value=0.2, step=0.01, value=0.05)
-    if method == "bootstrapping":
-        n_bootstraps = st.slider("Number of Bootstraps", min_value=10, max_value=200, step=10, value=100)
-    elif method == "quantile":
-        lower_q = st.slider("Lower Quantile", min_value=0.01, max_value=0.5, step=0.01, value=0.025)
-        upper_q = st.slider("Upper Quantile", min_value=0.5, max_value=0.99, step=0.01, value=0.975)
-
-target_variable = st.selectbox("Target Variable", df.columns)
-
-if st.button("Run Forecast Intervals"):
-    forecast_periods = st.slider("Forecast Periods", min_value=1, max_value=24, step=1, value=12)
-    lags = st.slider("Number of Lags", min_value=1, max_value=24, step=1, value=12)
-    train_size = 0.8  # Define train_size variable
-    results = generate_prediction_intervals(
-        df=df,
-        target_variable=target_variable,
-        train_size=train_size,
-        lags=lags,
-        forecast_periods=forecast_periods,
-        method=method,
-        prediction_type=prediction_type,
-        alpha=alpha,
-        n_bootstraps=n_bootstraps if method == "bootstrapping" else None,
-        lower_q=lower_q if method == "quantile" else None,
-        upper_q=upper_q if method == "quantile" else None
-    )
-
-def plot_interactive_forecast(
-    results,
-    title="Forecast with Prediction Intervals",
-    xlabel="Date",
-    ylabel="Total Sales"
-):
-    fig = go.Figure()
-
-    # Add predictions
-    fig.add_trace(go.Scatter(
-        x=results.index, 
-        y=results['prediction'], 
-        mode='lines', 
-        name='Prediction',
-        line=dict(color='blue')
-    ))
-
-    # Add actual values
-    if 'actual' in results.columns:
-        fig.add_trace(go.Scatter(
-            x=results.index, 
-            y=results['actual'], 
-            mode='lines', 
-            name='Actual',
-            line=dict(color='black', dash='dot')
-        ))
-
-    # Add confidence intervals
-    fig.add_trace(go.Scatter(
-        x=results.index.tolist() + results.index[::-1].tolist(),
-        y=results['upper_bound'].tolist() + results['lower_bound'][::-1].tolist(),
-        fill='toself',
-        fillcolor='rgba(0,100,80,0.2)',
-        line=dict(color='rgba(255,255,255,0)'),
-        name='Prediction Interval'
-    ))
-
-    # Update layout
-    fig.update_layout(
-        title=title,
-        xaxis_title=xlabel,
-        yaxis_title=ylabel,
-        template="plotly_white"
-    )
-
-    return fig
-
-if st.button("Plot Forecast"):
-    fig = plot_interactive_forecast(results)
-    st.plotly_chart(fig, use_container_width=True)
