@@ -198,8 +198,7 @@ class TimeSeriesPreprocessor:
 
             # Ensure enough data points
             if sequences_count < 3:
-                st.error(
-                    f"Not enough sequences for the given sequence length ({sequence_length}). Minimum required is 3 sequences, but got {sequences_count}.")
+                st.error(f"Not enough sequences for the given sequence length ({sequence_length}). Minimum required is 3 sequences, but got {sequences_count}.")
                 return None, None, None
 
             # Calculate the effective sizes based on sequences_count
@@ -237,16 +236,14 @@ class TimeSeriesPreprocessor:
 
             # Handle cases where any dataset split is empty
             if len(train_sequences) == 0 or len(val_sequences) == 0 or len(test_sequences) == 0:
-                st.error(
-                    "One of the datasets (train, val, or test) is empty. Adjust the sequence length or split ratios.")
+                st.error("One of the datasets (train, val, or test) is empty. Adjust the sequence length or split ratios.")
                 return None, None, None
 
             # Adjust batch size based on train_size
             adjusted_batch_size = max(1, min(batch_size, train_size // 10))
 
             # Create TensorFlow datasets
-            train_dataset = tf.data.Dataset.from_tensor_slices((train_sequences, train_targets)).shuffle(1024).batch(
-                adjusted_batch_size)
+            train_dataset = tf.data.Dataset.from_tensor_slices((train_sequences, train_targets)).shuffle(1024).batch(adjusted_batch_size)
             val_dataset = tf.data.Dataset.from_tensor_slices((val_sequences, val_targets)).batch(adjusted_batch_size)
             test_dataset = tf.data.Dataset.from_tensor_slices((test_sequences, test_targets)).batch(adjusted_batch_size)
 

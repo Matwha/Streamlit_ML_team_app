@@ -73,3 +73,64 @@ class StackedModel(DeepLearningModel):
         outputs = layers.Dense(1)(x)
         self.model = keras.Model(inputs, outputs)
         return self.model
+
+
+class SequentialModel(DeepLearningModel):
+    """Sequential model implementation with customizable layers."""
+
+    def __init__(self, name="Sequential", sequence_length=10, n_features=1):
+        super().__init__(name, sequence_length, n_features)
+        self.layers_config = []
+
+    def add_layer(self, layer_type, units, activation='relu', dropout=0.0):
+        """Add a layer to the model configuration."""
+        self.layers_config.append({
+            'type': layer_type,
+            'units': units,
+            'activation': activation,
+            'dropout': dropout
+        })
+
+    def build(self, learning_rate=0.001):
+        """Build Sequential model with configured layers."""
+        inputs = keras.Input(shape=(self.sequence_length, self.n_features))
+        x = inputs
+
+        for layer_config in self.layers_config:
+            if layer_config['type'].lower() == 'dense':
+                x = layers.Dense(
+                    layer_config['units'],
+                    activation=layer_config['activation']
+                )(x)
+            elif layer_config['type'].lower() == 'lstm':
+                x = layers.LSTM(
+                    layer_config['units'],
+                    activation=layer_config['activation'],
+                    return_sequences=True
+                )(x)
+            elif layer_config['type'].lower() == 'gru':
+                x = layers.GRU(
+                    layer_config['units'],
+                    activation=layer_config['activation'],
+                    return_sequences=True
+                )(x)
+
+            if layer_config['dropout'] > 0:
+                x = layers.Dropout(layer_config['dropout'])(x)
+
+        # Add final dense layer for prediction
+        outputs = layers.Dense(1)(x)
+
+        self.model = keras.Model(inputs, outputs)
+        optimizer = keras.optimizers.Adam(learning_rate=learning_rate)
+        self.model.compile(
+            optimizer=optimizer,
+            loss='mse',
+            metrics=['mae']
+        )
+
+        return self.model
+
+    def summary(self):
+        """Print model summary."""
+        return self.model.summary()

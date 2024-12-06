@@ -147,3 +147,18 @@ class ModelEvaluator:
                     st.write(f"Null Hypothesis: {test_results['null_hypothesis']}")
                     st.write(f"Test Statistic: {test_results['statistic']:.4f}")
                     st.write(f"P-value: {test_results['p_value']:.4f}")
+
+    def calculate_prediction_intervals(model, data, predictions, alpha=0.05):
+        """Calculate prediction intervals based on model type."""
+        if hasattr(model, 'get_forecast'):  # For ARIMA/SARIMA models
+            forecast = model.get_forecast(len(data))
+            return forecast.conf_int(alpha=alpha)
+        else:  # For ML models
+            residuals = data - predictions
+            std_dev = np.std(residuals)
+            z_score = stats.norm.ppf(1 - alpha / 2)
+
+            lower_bound = predictions - z_score * std_dev
+            upper_bound = predictions + z_score * std_dev
+
+            return lower_bound, upper_bound

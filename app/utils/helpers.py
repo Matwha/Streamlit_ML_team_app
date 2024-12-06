@@ -72,7 +72,7 @@ def setup_environment():
     import tensorflow as tf
 
     # Suppress TensorFlow warnings
-    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TF logging
+    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress TF logging (instead of '2')
     os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # Disable oneDNN custom operations
 
     # Configure TensorFlow
@@ -81,3 +81,4 @@ def setup_environment():
     # Suppress other warnings
     warnings.filterwarnings('ignore', category=FutureWarning)
     warnings.filterwarnings('ignore', category=UserWarning)
+    warnings.filterwarnings('ignore', category=DeprecationWarning)

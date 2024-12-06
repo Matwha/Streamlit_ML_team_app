@@ -16,16 +16,29 @@ class ARIMAModel(TimeSeriesModel):
         super().__init__(name)
         self.order = None
         self.fitted_model = None
+        self.test_data = None
 
-    def build(self, order=None):
+    def build(self, **kwargs):
         """
         Build ARIMA model with specified or auto-determined order.
 
         Args:
-            order (tuple): ARIMA order (p,d,q)
+            p (int): AR order
+            d (int): Differencing order
+            q (int): MA order
         """
-        self.order = order
-        return self
+        try:
+            # Extract order parameters from kwargs
+            p = kwargs.get('p', 1)
+            d = kwargs.get('d', 1)
+            q = kwargs.get('q', 1)
+            
+            self.order = (p, d, q)
+            return self
+
+        except Exception as e:
+            st.error(f"Error building ARIMA model: {str(e)}")
+            return None
 
     def auto_order(self, train_data, seasonal=False):
         """
@@ -97,6 +110,28 @@ class ARIMAModel(TimeSeriesModel):
             st.error(f"Error in ARIMA prediction: {str(e)}")
             return None
 
+    def calculate_prediction_intervals(self, alpha=0.95):
+        """
+        Calculate prediction intervals for forecasts.
+
+        Args:
+            alpha (float): Confidence level (between 0 and 1)
+
+        Returns:
+            tuple: (lower bound array, upper bound array)
+        """
+        try:
+            if self.fitted_model is None:
+                raise ValueError("Model has not been trained yet")
+            
+            forecast_obj = self.fitted_model.get_forecast(steps=len(self.test_data))
+            conf_int = forecast_obj.conf_int(alpha=alpha)
+            return conf_int[:, 0], conf_int[:, 1]  # Lower and upper bounds
+            
+        except Exception as e:
+            st.error(f"Error calculating prediction intervals: {str(e)}")
+            return None, None
+
     def evaluate(self, test_data):
         """
         Evaluate model on test data.
@@ -108,6 +143,7 @@ class ARIMAModel(TimeSeriesModel):
             dict: Dictionary of evaluation metrics
         """
         try:
+            self.test_data = test_data
             predictions = self.predict(steps=len(test_data))
             mae = np.mean(np.abs(predictions - test_data))
             rmse = np.sqrt(np.mean((predictions - test_data) ** 2))
