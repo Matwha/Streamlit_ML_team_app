@@ -210,9 +210,9 @@ def generate_prediction_intervals(
 
             # Create future index
             future_index = pd.date_range(
-                start=series.index[-1],
+                start=df.index[-1],
                 periods=forecast_periods + 1,
-                freq=pd.infer_freq(series.index)
+                freq=pd.infer_freq(df.index)
             )[1:]
 
             # Create results DataFrame
@@ -237,7 +237,12 @@ with st.sidebar:
         lower_q = st.slider("Lower Quantile", min_value=0.01, max_value=0.5, step=0.01, value=0.025)
         upper_q = st.slider("Upper Quantile", min_value=0.5, max_value=0.99, step=0.01, value=0.975)
 
+target_variable = st.selectbox("Target Variable", df.columns)
+
 if st.button("Run Forecast Intervals"):
+    forecast_periods = st.slider("Forecast Periods", min_value=1, max_value=24, step=1, value=12)
+    lags = st.slider("Number of Lags", min_value=1, max_value=24, step=1, value=12)
+    train_size = 0.8  # Define train_size variable
     results = generate_prediction_intervals(
         df=df,
         target_variable=target_variable,
