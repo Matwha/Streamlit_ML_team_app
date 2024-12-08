@@ -1,315 +1,301 @@
-"""Main Streamlit application for time series forecasting."""
+# In main.py:
+
 import streamlit as st
-import plotly.graph_objects as go
-import tensorflow as tf
 import pandas as pd
 import numpy as np
-from models.trainer import ModelTrainer
-from dataclasses import dataclass
-from typing import Optional, Dict, Any
-from data.preprocessor import TimeSeriesPreprocessor
-
-from config import APP_TITLE, APP_DESCRIPTION, DEFAULT_GITHUB_REPO
+from config import *
 from data.loader import DataLoader
-from data.data_analyzer import TimeSeriesAnalyzer
-from models.evaluation import PredictionDisplayManager
-from models.traditional import create_traditional_model
-from models.machine_learning import create_ml_model
-from models.deep_learning import SimpleRNNModel, LSTMModel, StackedModel, SequentialModel
-from utils.helpers import (
-    setup_environment,
-    validate_data,
-    setup_model_selection,
-    get_model_parameters,
-    display_data_analysis_tabs
-)
+from models.evaluation import ModelEvaluator, plot_model_comparison, plot_predictions
+from models.arima import ARIMAModel, SARIMAModel
+from models.rf_sgb import RandomForestModel, XGBoostModel
+from models.rnn_lstm import SimpleRNNModel, LSTMModel, StackedModel
+
+def initialize_model(model_name, config):
+    """Initialize model with given configuration"""
+    if model_name == 'LSTM':
+        model = LSTMModel(
+            sequence_length=config['sequence_length'],
+            n_features=1
+        )
+        model.build(units=config['units'])
+    elif model_name == 'Simple RNN':
+        model = SimpleRNNModel(
+            sequence_length=config['sequence_length'],
+            n_features=1
+        )
+        model.build(units=config['units'])
+    elif model_name == 'Stacked LSTM+RNN':
+        model = StackedModel(
+            sequence_length=config['sequence_length'],
+            n_features=1
+        )
+        model.build(lstm_units=config['units'])
+    elif model_name == 'ARIMA':
+        model = ARIMAModel(order=(config['p'], config['d'], config['q']))
+    elif model_name == 'SARIMA':
+        model = SARIMAModel(
+            order=(config['p'], config['d'], config['q']),
+            seasonal_order=(config['p'], config['d'], config['q'], config['s'])
+        )
+    elif model_name == 'Random Forest':
+        model = RandomForestModel(
+            n_estimators=config['n_estimators'],
+            max_depth=config['max_depth']
+        )
+    else:  # XGBoost
+        model = XGBoostModel(
+            n_estimators=config['n_estimators'],
+            max_depth=config['max_depth']
+        )
+    return model
+
+def get_model_preprocessing_options(self, model_name):
+    """Get model-specific preprocessing options"""
+    options = {}
+    if model_name in ['Simple RNN', 'LSTM', 'Stacked LSTM+RNN']:
+        options.update({
+            'sequence_scaler': st.selectbox(
+                f"{model_name} Sequence Scaler",
+                ['StandardScaler', 'MinMaxScaler', 'None'],
+                key=f"seq_scaler_{model_name}"
+            ),
+            'create_lags': st.checkbox(
+                f"{model_name} Create Lagged Features",
+                value=True,
+                key=f"create_lags_{model_name}"
+            ),
+            'lag_length': st.number_input(
+                f"{model_name} Lag Length",
+                min_value=1, max_value=20, value=12,
+                key=f"lag_length_{model_name}"
+            )
+        })
+    return options
 
 
-@dataclass
-class AppState:
-    """Class to store application state."""
-    analysis_complete: bool = False
-    selected_model: Optional[str] = None
-    target_column: Optional[str] = None
-    trained_model: Any = None
-    results: Optional[Dict] = None
+def initialize_app_state():
+    """Initialize application state and session variables."""
+    if 'trained_models' not in st.session_state:
+        st.session_state.trained_models = {}
+        st.session_state.session_id = str(int(time.time()))
+
+    if 'data_state' not in st.session_state:
+        st.session_state.data_state = {
+            'raw_data': None,
+            'processed_data': None,
+            'file_hash': None,
+            'index_col': None,
+            'target_col': None
+        }
 
 
-class TimeSeriesApp:
-    """Main application class for time series forecasting."""
-
-    def __init__(self):
-        """Initialize application components."""
-        setup_environment()
-        self.data_loader = DataLoader()
-        self.display_manager = PredictionDisplayManager()
-
-        # Initialize session state
-        if 'app_state' not in st.session_state:
-            st.session_state.app_state = AppState()
-
-    def setup_page(self):
-        """Configure page settings and display title."""
-        st.set_page_config(layout="wide", page_title=APP_TITLE)
-        st.title(APP_TITLE)
-        st.markdown(APP_DESCRIPTION)
-
-    def load_data(self) -> Optional[pd.DataFrame]:
-        """Handle data loading from various sources."""
-        st.sidebar.header("1. Data Source")
-        data_source = st.sidebar.radio(
-            "Select data source",
-            ["GitHub Repository", "Upload File", "Example Data"]
+def create_sidebar():
+    """Create and handle sidebar elements."""
+    with st.sidebar:
+        selected_metrics = st.multiselect(
+            "Comparison Metrics",
+            options=AVAILABLE_METRICS,
+            default=DEFAULT_METRICS,
+            key=f"metrics_select_{st.session_state.session_id}"
         )
 
-        df = None
-        if data_source == "GitHub Repository":
-            github_url = st.sidebar.text_input("GitHub repository URL", DEFAULT_GITHUB_REPO)
-            if github_url:
-                csv_files = self.data_loader.get_github_files(github_url)
-                if csv_files:
-                    selected_file = st.sidebar.selectbox(
-                        "Select CSV file",
-                        [file[0] for file in csv_files]
-                    )
-                    if selected_file:
-                        file_url = next(file[1] for file in csv_files
-                                        if file[0] == selected_file)
-                        df = self.data_loader.load_data(
-                            "github",
-                            github_url=github_url,
-                            selected_file=file_url
-                        )
-
-        elif data_source == "Upload File":
-            uploaded_file = st.sidebar.file_uploader("Upload CSV file", type=['csv'])
-            if uploaded_file:
-                df = self.data_loader.load_data("upload", uploaded_file=uploaded_file)
-
-        else:  # Example Data
-            df = self.data_loader.load_example_data()
-            st.sidebar.info("Using example data")
-
-        return df
-
-    def select_target_column(self, df: pd.DataFrame) -> Optional[str]:
-        """Allow user to select target column for analysis."""
-        target_column = st.sidebar.selectbox(
-            "Select Target Column",
-            df.columns.tolist()
+        selected_models = st.multiselect(
+            "Select Models (max 3)",
+            options=ALL_MODELS,
+            max_selections=3,
+            key=f"models_select_{st.session_state.session_id}"
         )
-        return target_column
 
-    def analyze_data(self, df: pd.DataFrame, target_column: str):
-        """Perform data analysis and display results."""
-        st.header("2. Data Analysis")
-        analyzer = TimeSeriesAnalyzer(df)
-        display_data_analysis_tabs(analyzer, target_column)
+        return selected_metrics, selected_models
 
-    def setup_model(self):
-        """Configure model selection and parameters."""
-        st.header("3. Model Selection")
-        available_models, model_name = setup_model_selection()
 
-        if model_name is None:
-            return None, None
+def handle_data_upload():
+    """Handle data upload and initial processing."""
+    uploaded_file = st.file_uploader(
+        "Upload Dataset (CSV)",
+        type=['csv'],
+        key=f"file_uploader_{st.session_state.session_id}"
+    )
 
-        # Get model parameters based on selection
-        params = get_model_parameters(model_name)
-
-        # Ensure params has the correct structure
-        if params is not None and not isinstance(params, dict):
-            params = {'build_params': params, 'train_params': {}}
-        elif params is not None and 'build_params' not in params:
-            params = {'build_params': params, 'train_params': {}}
-
-        return model_name, params
-
-    def create_model(self, model_name: str, model_params: Dict):
-        """Create model instance based on model type."""
+    if uploaded_file:
         try:
-            if model_name in ['Simple RNN', 'LSTM', 'Stacked LSTM+RNN', 'Sequential']:
-                # Extract initialization parameters
-                init_params = {
-                    'sequence_length': model_params['build_params'].pop('sequence_length', 10),
-                    'n_features': model_params['build_params'].pop('n_features', 1)
-                }
-
-                model_class = {
-                    'Simple RNN': SimpleRNNModel,
-                    'LSTM': LSTMModel,
-                    'Stacked LSTM+RNN': StackedModel,
-                    'Sequential': SequentialModel
-                }[model_name]
-
-                # Create model instance with init params
-                model = model_class(name=model_name, **init_params)
-
-                # Build model with build parameters only
-                model.build(**model_params['build_params'])
-
-                # Store training parameters in the model instance for later use
-                model.train_params = model_params['train_params']
-
-                return model
-
-            elif model_name in ['ARIMA', 'SARIMA']:
-                return create_traditional_model(model_name, **model_params['build_params'])
-            else:
-                return create_ml_model(model_name, **model_params['build_params'])
-
+            df = pd.read_csv(uploaded_file)
+            st.session_state.data_state['raw_data'] = df
+            st.session_state.data_state['file_hash'] = hash(uploaded_file.name)
+            return True
         except Exception as e:
-            st.error(f"Error creating model: {str(e)}")
-            return None
+            st.error(f"Error loading file: {str(e)}")
+            return False
+    return False
 
-    # In main.py, replace or modify the train_and_evaluate method:
 
-    def train_and_evaluate(self, df: pd.DataFrame, target_column: str, model_name: str, model_params: Dict):
-        """Train model and evaluate results."""
-        try:
-            # Create model instance
-            model = self.create_model(model_name, model_params)
-            if model is None:
-                return None, None, None
+def main():
+    st.set_page_config(layout="wide", page_title=APP_TITLE)
+    st.title(APP_TITLE)
 
-            # Create trainer instance
-            trainer = ModelTrainer(model, target_column)
+    # Initialize app state
+    initialize_app_state()
 
-            # Train and evaluate
-            return trainer.train_and_evaluate(df, model_name, model_params)
+    # Create sidebar and get selections
+    selected_metrics, selected_models = create_sidebar()
 
-        except Exception as e:
-            st.error(f"Error in model training and evaluation: {str(e)}")
-            with st.expander("🔍 Debug: Error Details", expanded=True):
-                st.error(f"Error Type: {type(e).__name__}")
-                st.error(f"Error Message: {str(e)}")
-                import traceback
-                st.code(traceback.format_exc())
-            return None, None, None
+    # Create main tabs
+    main_tabs = st.tabs([
+        "Data & Analysis",
+        "Model Configuration",
+        "Training Monitor",
+        "Results & Comparison"
+    ])
 
-    def run(self):
-        """Run the main application."""
-        self.setup_page()
+    # Handle Data & Analysis Tab
+    with main_tabs[0]:
+        if handle_data_upload():
+            # Continue with data processing...
+            pass
 
-        # Load data
-        df = self.load_data()
-        if df is None or not validate_data(df)[0]:
-            return
 
-        # Select target column
-        target_column = self.select_target_column(df)
-        if target_column is None:
-            return
+def handle_unnamed_columns(df, file_hash):
+    """Handle unnamed columns in the dataset."""
+    unnamed_cols = [col for col in df.columns if 'Unnamed' in str(col)]
+    if unnamed_cols:
+        st.warning(f"Found {len(unnamed_cols)} unnamed columns")
 
-        # Initialize preprocessor and get options
-        preprocessor = TimeSeriesPreprocessor()
-        preprocessing_options = preprocessor.add_preprocessing_controls()
+        handle_unnamed = st.radio(
+            "How to handle unnamed columns?",
+            ["Rename", "Drop"],
+            key=f"unnamed_action_{file_hash}"
+        )
 
-        # Analyze original data before preprocessing
-        self.analyze_data(df, target_column)
+        if handle_unnamed == "Rename":
+            col_renames = {}
+            for i, col in enumerate(unnamed_cols):
+                new_name = st.text_input(
+                    f"New name for {col}",
+                    value=f"col_{i}",
+                    key=f"rename_unnamed_{i}_{file_hash}"
+                )
+                col_renames[col] = new_name
 
-        # Setup model
-        model_name, model_params = self.setup_model()
-        if model_name is None:
-            return
+            if st.button("Apply Column Renaming", key=f"apply_rename_{file_hash}"):
+                df = df.rename(columns=col_renames)
+                st.success("Columns renamed successfully!")
+        else:
+            if st.button("Drop Unnamed Columns", key=f"drop_unnamed_{file_hash}"):
+                df = df.drop(columns=unnamed_cols)
+                st.success("Unnamed columns dropped!")
 
-        # Add display and prediction controls
-        display_options = st.sidebar.expander("Display & Prediction Options", expanded=True)
-        with display_options:
-            # Display settings
-            display_type = st.selectbox(
-                "Display Predictions As",
-                ["Table", "Graph", "Both"]
+    return df
+
+
+def configure_time_index(df, file_hash):
+    """Configure time index for the dataset."""
+    st.write("### Time Index Configuration")
+
+    date_cols = [col for col in df.columns
+                 if any(term in str(col).lower()
+                        for term in ['date', 'time', 'month', 'year'])]
+
+    if not date_cols:
+        date_cols = df.columns.tolist()
+        st.warning("No date/time columns automatically detected")
+
+    index_col = st.selectbox(
+        "Select Time Index Column",
+        date_cols,
+        key=f"time_index_select_{file_hash}"
+    )
+
+    if index_col:
+        freq_options = {
+            'B': 'Business Day',
+            'D': 'Calendar Day',
+            'W': 'Weekly',
+            'M': 'Monthly',
+            'Q': 'Quarterly',
+            'Y': 'Yearly'
+        }
+
+        col1, col2 = st.columns(2)
+        with col1:
+            freq = st.selectbox(
+                "Select Frequency",
+                options=list(freq_options.keys()),
+                format_func=lambda x: freq_options[x],
+                key=f"freq_select_{file_hash}"
             )
 
-            # Confidence interval settings
-            show_intervals = st.checkbox("Show Confidence Intervals", value=False)
-            if show_intervals:
-                confidence_level = st.slider(
-                    "Confidence Level",
-                    min_value=0.8,
-                    max_value=0.99,
-                    value=0.95,
-                    step=0.01
-                )
-                interval_method = st.selectbox(
-                    "Interval Method",
-                    ["Bootstrap", "Quantile", "Analytical"]
-                )
-                if interval_method == "Bootstrap":
-                    n_iterations = st.slider(
-                        "Bootstrap Iterations",
-                        min_value=100,
-                        max_value=1000,
-                        value=500,
-                        step=100
-                    )
-
-                # Add interval settings to model parameters
-                if 'train_params' not in model_params:
-                    model_params['train_params'] = {}
-
-                model_params['train_params'].update({
-                    'return_intervals': show_intervals,
-                    'confidence_level': confidence_level if show_intervals else None,
-                    'interval_method': interval_method if show_intervals else None,
-                    'n_iterations': n_iterations if show_intervals and interval_method == "Bootstrap" else None
-                })
-
-        # Additional display controls from display manager
-        display_settings = self.display_manager.add_sidebar_controls()
-
-        # Store display preferences in session state
-        if 'display_settings' not in st.session_state:
-            st.session_state.display_settings = {}
-
-        st.session_state.display_settings.update({
-            'display_type': display_type,
-            'show_intervals': show_intervals,
-            'confidence_level': confidence_level if show_intervals else None,
-            'interval_method': interval_method if show_intervals else None,
-            'n_iterations': n_iterations if show_intervals and interval_method == "Bootstrap" else None
-        })
-
-        # Train and evaluate
-        if st.button("Run Analysis"):
-            with st.spinner("Running analysis..."):
-                # Train and evaluate with original dataframe
-                model, results_df, metrics = self.train_and_evaluate(
-                    df=df,
-                    target_column=target_column,
-                    model_name=model_name,
-                    model_params=model_params
+        with col2:
+            period_anchor = None
+            if freq in ['W', 'M', 'Q']:
+                period_anchor = st.selectbox(
+                    "Period Anchor",
+                    ['Start', 'End'],
+                    key=f"anchor_select_{file_hash}"
                 )
 
-                if model is not None:
-                    st.session_state.app_state.analysis_complete = True
-                    st.session_state.app_state.trained_model = model
-                    st.session_state.app_state.results = {
-                        'df': results_df,
-                        'metrics': metrics
-                    }
+        if st.button("Apply Period Index", key=f"apply_period_{file_hash}"):
+            try:
+                df = convert_to_period_index(df, index_col, freq, period_anchor)
+                st.success("Period Index configured successfully!")
+                return df, index_col
+            except Exception as e:
+                st.error(f"Error configuring period index: {str(e)}")
 
-                    # Display results based on selected display type
-                    if display_type in ["Table", "Both"]:
-                        st.subheader("Prediction Results - Table View")
-                        st.dataframe(results_df)
+    return df, None
 
-                    if display_type in ["Graph", "Both"]:
-                        st.subheader("Prediction Results - Graph View")
-                        self.display_manager.plot_predictions(
-                            results_df,
-                            show_intervals=show_intervals,
-                            model_name=model_name
-                        )
 
-                    # Display metrics
-                    st.subheader("Model Performance Metrics")
-                    self.display_manager.display_metrics(metrics)
+def convert_to_period_index(df, index_col, freq, period_anchor=None):
+    """Convert dataframe index to period index."""
+    df = df.copy()
+    df.index = pd.to_datetime(df[index_col])
 
-                    st.success("Analysis completed successfully!")
+    if freq in ['W', 'M', 'Q'] and period_anchor == 'End':
+        offset_map = {'W': 'W-SAT', 'M': 'M', 'Q': 'Q'}
+        df.index = df.index + pd.offsets.to_offset(offset_map[freq])
+
+    df.index = df.index.to_period(freq)
+    df = df.drop(columns=[index_col])
+
+    return df
+
+
+def handle_column_management(df, file_hash):
+    """Handle column selection and renaming."""
+    if st.checkbox("Show Column Management", key=f"show_col_mgmt_{file_hash}"):
+        st.write("### Column Management")
+
+        selected_cols = st.multiselect(
+            "Select and Reorder Columns",
+            df.columns.tolist(),
+            default=df.columns.tolist(),
+            key=f"col_select_{file_hash}"
+        )
+
+        if selected_cols:
+            df = df[selected_cols]
+
+        if st.checkbox("Rename Columns", key=f"show_rename_{file_hash}"):
+            col1, col2, col3 = st.columns([2, 2, 1])
+            with col1:
+                col_to_rename = st.selectbox(
+                    "Select Column",
+                    df.columns.tolist(),
+                    key=f"rename_select_{file_hash}"
+                )
+            with col2:
+                new_name = st.text_input(
+                    "New Name",
+                    value=col_to_rename,
+                    key=f"new_name_{file_hash}"
+                )
+            with col3:
+                if st.button("Rename", key=f"rename_btn_{file_hash}"):
+                    df = df.rename(columns={col_to_rename: new_name})
+                    st.success(f"Renamed {col_to_rename} to {new_name}")
+
+    return df
+
 
 
 if __name__ == "__main__":
-    app = TimeSeriesApp()
-    app.run()
+    main()
